@@ -1,0 +1,18 @@
+[package]
+name = "server"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono"] }
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
+anyhow = "1"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.6"
+config = "0.15.26"
+dotenvy = "0.15.7"
+sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "macros", "migrate"] }
+deadpool-redis = { version = "0.23.1", features = ["rt_tokio_1"] }
+redis = "1.7.1"
