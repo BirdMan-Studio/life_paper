@@ -64,12 +64,11 @@ async fn init_and_connect(cfg: &PostgresConfig) -> anyhow::Result<PgPool> {
         .connect_with(admin_opts)
         .await?;
 
-    let db_exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)",
-    )
-    .bind(&cfg.database)
-    .fetch_one(&admin_pool)
-    .await?;
+    let db_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)")
+            .bind(&cfg.database)
+            .fetch_one(&admin_pool)
+            .await?;
 
     if !db_exists {
         tracing::info!(target: "db", "database does not exist, creating...");
@@ -81,12 +80,11 @@ async fn init_and_connect(cfg: &PostgresConfig) -> anyhow::Result<PgPool> {
     }
 
     // --- 2. 创建 controller 用户（如不存在） ---
-    let user_exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = $1)",
-    )
-    .bind(&controller_user)
-    .fetch_one(&admin_pool)
-    .await?;
+    let user_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = $1)")
+            .bind(&controller_user)
+            .fetch_one(&admin_pool)
+            .await?;
 
     if !user_exists {
         tracing::info!(target: "db", "creating controller user...");

@@ -1,17 +1,19 @@
+mod api;
 mod config;
 mod db;
+mod domain;
+mod game;
 mod state;
 
 use config::Config;
 use state::AppState;
-use tracing_subscriber::fmt::time::ChronoLocal;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::time::ChronoLocal;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // --- 1. 日志初始化 ---
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let timer = ChronoLocal::new("%Y-%m-%d %H:%M:%S%.3f".to_string());
     tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -33,22 +35,31 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // --- 4. 构建共享状态与路由 ---
-    let state = AppState { pg_pool, redis_pool };
+    // --- 4. 构建共享状态与 API 路由 ---
+    let state = AppState {
+        users: db::UserRepository::new(pg_pool),
+        redis_pool,
+    };
 
-    let app: axum::Router = axum::Router::new()
-        .route("/", axum::routing::get(|| async { "hello" }))
-        .with_state(state);
+    let app = api::router(state);
 
     // --- 5. 绑定端口 ---
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!(target: "main", "listening on {}:{}", config.server.host, config.server.port);
+    tracing::info!(target: "main", "server started on {}:{}", config.server.host, config.server.port);
 
-    // --- 6. 启动服务 + 优雅关闭 ---
-    axum::serve(listener, app)
+    // --- 6. 启动游戏循环与 API 服务 ---
+    let game_task = tokio::spawn(game::run());
+
+    let server_result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
-        .await?;
+        .await;
+
+    // 游戏循环目前没有自己的退出信号，API 服务停止后直接结束该任务。
+    game_task.abort();
+    let _ = game_task.await;
+
+    server_result?;
 
     tracing::info!(target: "main", "server stopped");
     Ok(())

@@ -1,5 +1,8 @@
 pub mod postgres;
 pub mod redis_pool;
+pub mod user;
+
+pub use user::UserRepository;
 
 use crate::config::Config;
 

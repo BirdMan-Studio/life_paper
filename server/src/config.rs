@@ -115,16 +115,13 @@ impl Config {
     /// 检查 config.toml 中所有必需字段是否都已填入。
     /// 缺失时返回错误，错误信息里列出所有缺失的字段。
     fn validate(content: &str) -> anyhow::Result<()> {
-        let value: toml::Value = toml::from_str(content)
-            .map_err(|e| anyhow::anyhow!("config.toml 语法错误: {e}"))?;
+        let value: toml::Value =
+            toml::from_str(content).map_err(|e| anyhow::anyhow!("config.toml 语法错误: {e}"))?;
 
         let mut missing = Vec::new();
 
         for (section, field) in REQUIRED_FIELDS {
-            let present = value
-                .get(section)
-                .and_then(|t| t.get(field))
-                .is_some();
+            let present = value.get(section).and_then(|t| t.get(field)).is_some();
             if !present {
                 missing.push(format!("{section}.{field}"));
             }
