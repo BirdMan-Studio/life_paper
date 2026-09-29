@@ -93,6 +93,13 @@
 
 ### 获取账号信息
 
+`GET /account/me`（需要认证）
+
+请求头：`Authorization: Bearer <token>`
+响应 `200`：`{ "data": { "id": 1, "username": "alice", "email": "alice@example.com" } }`
+
+用于验证当前 token 是否有效，并取得当前登录账号的基础信息。token 无效、过期或对应账号不存在时返回 `401`。
+
 ### 修改账号信息
 
 ## 服务器相关

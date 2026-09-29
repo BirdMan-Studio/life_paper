@@ -8,7 +8,7 @@ use axum::{
     Json, Router,
     extract::State,
     http::{HeaderMap, StatusCode, header::AUTHORIZATION},
-    routing::{delete, post},
+    routing::{delete, get, post},
 };
 use chrono::{Duration, Utc};
 use redis::AsyncCommands;
@@ -22,6 +22,7 @@ pub fn routes() -> Router<AppState> {
         .route("/auth/register", post(register))
         .route("/auth/login", post(login))
         .route("/auth/logout", post(logout))
+        .route("/account/me", get(account_me))
         .route("/account", delete(delete_account))
 }
 
@@ -53,6 +54,13 @@ struct RegisteredUser {
 struct LoginData {
     token: String,
     expires_at: String,
+}
+
+#[derive(Serialize)]
+struct AccountProfile {
+    id: i64,
+    username: String,
+    email: String,
 }
 
 struct AuthenticatedSession {
@@ -122,6 +130,34 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result<Sta
     delete_session(&state, session.user_id, &session.token).await?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn account_me(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<DataResponse<AccountProfile>>, ApiError> {
+    let session = authenticate(&state, &headers).await?;
+    let user = state
+        .users
+        .find_by_id(session.user_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(target: "api", %error, user_id = session.user_id, "failed to query current account");
+            ApiError::Internal
+        })?;
+
+    let Some(user) = user else {
+        delete_session(&state, session.user_id, &session.token).await?;
+        return Err(ApiError::Unauthorized);
+    };
+
+    Ok(Json(DataResponse {
+        data: AccountProfile {
+            id: user.id,
+            username: user.username,
+            email: user.email,
+        },
+    }))
 }
 
 async fn delete_account(
