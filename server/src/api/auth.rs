@@ -63,9 +63,9 @@ struct AccountProfile {
     email: String,
 }
 
-struct AuthenticatedSession {
+pub(crate) struct AuthenticatedSession {
     token: String,
-    user_id: i64,
+    pub(crate) user_id: i64,
 }
 
 async fn register(
@@ -166,6 +166,7 @@ async fn delete_account(
 ) -> Result<StatusCode, ApiError> {
     let session = authenticate(&state, &headers).await?;
     revoke_all_sessions(&state, session.user_id).await?;
+    state.worlds.remove_for_user(session.user_id);
 
     let deleted = state.users.delete(session.user_id).await.map_err(|error| {
         tracing::error!(target: "api", %error, user_id = session.user_id, "failed to delete account");
@@ -272,7 +273,7 @@ async fn create_session(state: &AppState, user: &User) -> Result<String, ApiErro
     Ok(token)
 }
 
-async fn authenticate(
+pub(crate) async fn authenticate(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<AuthenticatedSession, ApiError> {

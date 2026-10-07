@@ -7,6 +7,7 @@ mod state;
 
 use config::Config;
 use state::AppState;
+use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::time::ChronoLocal;
 
@@ -36,9 +37,22 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // --- 4. 构建共享状态与 API 路由 ---
+    let elements = Arc::new(domain::create_default_element_registry()?);
+    let components = Arc::new(domain::create_default_component_registry()?);
+    let terrains = Arc::new(domain::create_default_terrain_registry()?);
+    let worlds = Arc::new(domain::WorldDirectory::new_with_storage(
+        Arc::clone(&terrains),
+        "data/worlds",
+    )?);
+    let game_worlds = Arc::clone(&worlds);
+
     let state = AppState {
         users: db::UserRepository::new(pg_pool),
         redis_pool,
+        elements,
+        components,
+        terrains,
+        worlds,
     };
 
     let app = api::router(state);
@@ -49,7 +63,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(target: "main", "server started on {}:{}", config.server.host, config.server.port);
 
     // --- 6. 启动游戏循环与 API 服务 ---
-    let game_task = tokio::spawn(game::run());
+    let game_task = tokio::spawn(game::run(game_worlds));
 
     let server_result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
