@@ -1,7 +1,13 @@
+pub mod component_unlock;
+pub mod organism_model;
+pub mod player_data;
 pub mod postgres;
 pub mod redis_pool;
 pub mod user;
 
+pub use component_unlock::{ComponentUnlockRepository, UnlockResult};
+pub use organism_model::{OrganismModelRecord, OrganismModelRepository};
+pub use player_data::PlayerDataRepository;
 pub use user::UserRepository;
 
 use crate::config::Config;

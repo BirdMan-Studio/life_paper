@@ -6,7 +6,8 @@ use crate::{
     pages::{
         Page,
         auth::{AuthPage, AuthPageEvent},
-        creatures, models,
+        creatures::{CreaturesPage, CreaturesPageEvent},
+        models,
         settings::{SettingsPage, SettingsPageEvent},
         world,
     },
@@ -25,8 +26,10 @@ pub struct LifePaperApp {
     page: Page,
     auth_page: AuthPage,
     settings_page: SettingsPage,
+    creatures_page: CreaturesPage,
     session: SessionState,
     notice: Option<Notice>,
+    navigation_collapsed: bool,
 }
 
 impl LifePaperApp {
@@ -70,23 +73,29 @@ impl LifePaperApp {
             api_client,
             auth_page: AuthPage::new(),
             settings_page: SettingsPage::new(&config),
+            creatures_page: CreaturesPage::new(),
             session,
             config,
             config_store,
             runtime,
             page: Page::Auth,
             notice,
+            navigation_collapsed: false,
         }
     }
 
     fn is_busy(&self) -> bool {
-        self.auth_page.is_busy() || self.settings_page.is_busy() || self.session.is_busy()
+        self.auth_page.is_busy()
+            || self.settings_page.is_busy()
+            || self.creatures_page.is_busy()
+            || self.session.is_busy()
     }
 
     fn clear_session(&mut self) {
         self.session.clear();
         self.auth_page.clear_password();
         self.settings_page.sync(&self.config);
+        self.creatures_page.reset();
         self.page = Page::Auth;
     }
 
@@ -176,6 +185,16 @@ impl LifePaperApp {
         }
     }
 
+    fn handle_creatures_event(&mut self, event: CreaturesPageEvent) {
+        match event {
+            CreaturesPageEvent::SessionExpired => self.clear_saved_session(Notice::error(text(
+                self.config.language,
+                "api.session_expired",
+            ))),
+            CreaturesPageEvent::Notice(notice) => self.notice = Some(notice),
+        }
+    }
+
     fn save_config(&mut self, config: ClientConfig) {
         let language = config.language;
         let server_changed = self.config.server_url != config.server_url;
@@ -215,6 +234,9 @@ impl LifePaperApp {
 
 impl eframe::App for LifePaperApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.notice.as_ref().is_some_and(Notice::is_expired) {
+            self.notice = None;
+        }
         self.poll_session();
 
         if let Some(event) = self.auth_page.poll(self.config.language) {
@@ -223,6 +245,9 @@ impl eframe::App for LifePaperApp {
         if let Some(event) = self.settings_page.poll() {
             self.handle_settings_event(event);
         }
+        if let Some(event) = self.creatures_page.poll(self.config.language) {
+            self.handle_creatures_event(event);
+        }
 
         let language = self.config.language;
         let is_busy = self.is_busy();
@@ -230,6 +255,7 @@ impl eframe::App for LifePaperApp {
             .session
             .current()
             .map(|session| session.username.clone());
+        let token = self.session.current().map(|session| session.token.clone());
 
         let mut shell_action = None;
         egui::TopBottomPanel::top("top_bar")
@@ -242,11 +268,18 @@ impl eframe::App for LifePaperApp {
                     &self.config.server_url,
                     username.as_deref(),
                     is_busy,
+                    !self.navigation_collapsed,
                 );
             });
-        if matches!(shell_action, Some(ShellAction::Logout)) {
-            self.session.start_logout(&self.api_client, &self.runtime);
-            self.notice = None;
+        match shell_action {
+            Some(ShellAction::Logout) => {
+                self.session.start_logout(&self.api_client, &self.runtime);
+                self.notice = None;
+            }
+            Some(ShellAction::ToggleNavigation) => {
+                self.navigation_collapsed = !self.navigation_collapsed;
+            }
+            None => {}
         }
 
         if self.session.is_authenticated()
@@ -254,37 +287,14 @@ impl eframe::App for LifePaperApp {
                 self.page,
                 Page::World | Page::Creatures | Page::Models | Page::Settings
             )
+            && !self.navigation_collapsed
         {
             egui::SidePanel::left("navigation")
-                .exact_width(210.0)
+                .exact_width(176.0)
                 .resizable(false)
                 .frame(egui::Frame::default().fill(theme::SIDEBAR))
                 .show(ctx, |ui| shell::navigation(ui, language, &mut self.page));
         }
-
-        egui::TopBottomPanel::bottom("status_bar")
-            .exact_height(30.0)
-            .frame(egui::Frame::default().fill(theme::SURFACE))
-            .show(ctx, |ui| {
-                ui.horizontal_centered(|ui| {
-                    if let Some(notice) = &self.notice {
-                        let color = if notice.is_error {
-                            theme::DANGER
-                        } else {
-                            theme::SUCCESS
-                        };
-                        ui.colored_label(color, &notice.message);
-                    } else if let Some(session) = self.session.current() {
-                        ui.weak(format!(
-                            "{} {}",
-                            text(language, "api.session_expires"),
-                            session.expires_at
-                        ));
-                    } else {
-                        ui.weak(text(language, "app.ready"));
-                    }
-                });
-            });
 
         let mut auth_event = None;
         let mut settings_event = None;
@@ -306,7 +316,17 @@ impl eframe::App for LifePaperApp {
                     );
                 }
                 Page::World => world::show(ui, language),
-                Page::Creatures => creatures::show(ui, language),
+                Page::Creatures => {
+                    if let Some(token) = token.as_deref() {
+                        self.creatures_page.show(
+                            ui,
+                            language,
+                            token,
+                            &self.api_client,
+                            &self.runtime,
+                        );
+                    }
+                }
                 Page::Models => models::show(ui, language),
                 Page::Settings => {
                     settings_event = self.settings_page.show(
@@ -324,6 +344,14 @@ impl eframe::App for LifePaperApp {
         }
         if let Some(event) = settings_event {
             self.handle_settings_event(event);
+        }
+
+        if let Some(notice) = &self.notice {
+            if shell::toast(ctx, notice, language) {
+                self.notice = None;
+            } else {
+                ctx.request_repaint_after(notice.remaining());
+            }
         }
 
         if self.is_busy() {

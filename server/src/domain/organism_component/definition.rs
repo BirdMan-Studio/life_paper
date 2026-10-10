@@ -82,6 +82,59 @@ impl ComponentSlots {
     }
 }
 
+/// 单个可选解锁方式。组件只需满足其中一种方式。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ComponentUnlockMethod {
+    EnergyCoins { amount: u64 },
+    GoldCoins { amount: u64 },
+    Achievement { achievement_id: String },
+}
+
+/// 解锁组件所需的条件。多个方式之间是 OR 关系。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ComponentUnlockRule {
+    pub default_unlocked: bool,
+    pub methods: Vec<ComponentUnlockMethod>,
+}
+
+impl ComponentUnlockRule {
+    pub fn paid(energy_coin_cost: u64, gold_coin_cost: u64) -> Self {
+        Self {
+            default_unlocked: false,
+            methods: [
+                (energy_coin_cost > 0).then_some(ComponentUnlockMethod::EnergyCoins {
+                    amount: energy_coin_cost,
+                }),
+                (gold_coin_cost > 0).then_some(ComponentUnlockMethod::GoldCoins {
+                    amount: gold_coin_cost,
+                }),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
+        }
+    }
+
+    pub fn achievement(achievement_id: impl Into<String>) -> Self {
+        Self {
+            default_unlocked: false,
+            methods: vec![ComponentUnlockMethod::Achievement {
+                achievement_id: achievement_id.into(),
+            }],
+        }
+    }
+}
+
+impl Default for ComponentUnlockRule {
+    fn default() -> Self {
+        Self {
+            default_unlocked: true,
+            methods: Vec::new(),
+        }
+    }
+}
+
 /// 可注册的生物组件定义。
 ///
 /// `function_code` 仅保存未来功能实现的稳定代码，不在注册阶段执行。
@@ -92,4 +145,6 @@ pub struct ComponentDefinition {
     pub category: ComponentCategory,
     pub slots: ComponentSlots,
     pub function_code: Option<String>,
+    #[serde(default)]
+    pub unlock: ComponentUnlockRule,
 }

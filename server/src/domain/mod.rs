@@ -18,7 +18,8 @@ pub use organism::{
 };
 pub use organism_component::{
     ComponentCategory, ComponentDefinition, ComponentId, ComponentRegistrationError,
-    ComponentRegistry, ComponentSlots, create_default_component_registry,
+    ComponentRegistry, ComponentSlots, ComponentUnlockMethod, ComponentUnlockRule,
+    create_default_component_registry,
 };
 pub use terrain::{
     TerrainDefinition, TerrainId, TerrainRegistrationError, TerrainRegistry,

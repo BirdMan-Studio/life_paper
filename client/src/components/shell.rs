@@ -1,8 +1,9 @@
-use crate::{config::Language, i18n::text, pages::Page, theme};
+use crate::{config::Language, i18n::text, pages::Page, state::Notice, theme};
 use eframe::egui;
 
 pub enum ShellAction {
     Logout,
+    ToggleNavigation,
 }
 
 pub fn top_bar(
@@ -11,10 +12,23 @@ pub fn top_bar(
     server_url: &str,
     username: Option<&str>,
     is_busy: bool,
+    navigation_visible: bool,
 ) -> Option<ShellAction> {
     let mut action = None;
     ui.horizontal_centered(|ui| {
         ui.add_space(16.0);
+        if username.is_some()
+            && ui
+                .button(if navigation_visible { "<" } else { ">" })
+                .on_hover_text(if navigation_visible {
+                    text(language, "navigation.collapse")
+                } else {
+                    text(language, "navigation.expand")
+                })
+                .clicked()
+        {
+            action = Some(ShellAction::ToggleNavigation);
+        }
         ui.heading("LIFE PAPER");
         ui.separator();
         ui.weak(text(language, "app.subtitle"));
@@ -69,13 +83,47 @@ pub fn navigation(ui: &mut egui::Ui, language: Language, page: &mut Page) {
 
 fn navigation_button(ui: &mut egui::Ui, page: &mut Page, target: Page, label: &str) {
     let selected = *page == target;
-    if ui
+    let response = ui
         .add_sized(
             [ui.available_width(), 40.0],
             egui::Button::new(label).selected(selected),
         )
-        .clicked()
-    {
+        .on_hover_text(label);
+    if response.clicked() {
         *page = target;
     }
+}
+
+pub fn toast(ctx: &egui::Context, notice: &Notice, language: Language) -> bool {
+    let mut dismissed = false;
+    let accent = if notice.is_error {
+        theme::DANGER
+    } else {
+        theme::SUCCESS
+    };
+    egui::Area::new(egui::Id::new("global_notice_toast"))
+        .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 70.0))
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            egui::Frame::default()
+                .fill(theme::SURFACE)
+                .stroke(egui::Stroke::new(1.0, accent))
+                .corner_radius(8)
+                .inner_margin(egui::Margin::symmetric(16, 10))
+                .show(ui, |ui| {
+                    ui.set_max_width(520.0);
+                    ui.horizontal(|ui| {
+                        ui.colored_label(accent, if notice.is_error { "!" } else { "OK" });
+                        ui.label(&notice.message);
+                        if ui
+                            .button("x")
+                            .on_hover_text(text(language, "common.close"))
+                            .clicked()
+                        {
+                            dismissed = true;
+                        }
+                    });
+                });
+        });
+    dismissed
 }

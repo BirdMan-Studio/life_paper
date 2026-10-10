@@ -15,6 +15,18 @@ pub fn create_default_element_registry() -> Result<ElementRegistry, ElementRegis
     let mut registry = ElementRegistry::new();
 
     registry.register(
+        "carbon",
+        "碳",
+        "C",
+        ElementCategory::Basic,
+        ElementPhysicalProperties::new(
+            PhaseArealDensity::new(Some(2.267), None, None),
+            3550.0,
+            None,
+        ),
+    )?;
+
+    registry.register(
         "hydrogen",
         "氢",
         "H",
@@ -73,7 +85,11 @@ mod tests {
     #[test]
     fn registers_builtin_elements_with_physical_properties() {
         let registry = create_default_element_registry().unwrap();
-        assert_eq!(registry.len(), 4);
+        assert_eq!(registry.len(), 5);
+
+        let carbon = registry.get("carbon").unwrap();
+        assert_eq!(carbon.category, ElementCategory::Basic);
+        assert_eq!(carbon.symbol, "C");
 
         let water = registry.get("water").unwrap();
         assert_eq!(water.name, "水");

@@ -79,14 +79,14 @@ async fn set_world_status(
     status: WorldStatus,
 ) -> Result<Json<DataResponse<WorldSummary>>, ApiError> {
     let session = authenticate(&state, &headers).await?;
-    let world = state.worlds.get(world_id).ok_or(ApiError::Unauthorized)?;
+    let world = state.worlds.get(world_id).ok_or(ApiError::NotFound)?;
     if world.owner_user_id != session.user_id {
-        return Err(ApiError::Unauthorized);
+        return Err(ApiError::Forbidden);
     }
     let world = state
         .worlds
         .set_status(world_id, status)
-        .ok_or(ApiError::Unauthorized)?;
+        .ok_or(ApiError::NotFound)?;
 
     Ok(Json(DataResponse {
         data: WorldSummary::from(world.as_ref()),

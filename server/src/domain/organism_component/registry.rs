@@ -1,4 +1,6 @@
-use super::definition::{ComponentCategory, ComponentDefinition, ComponentId, ComponentSlots};
+use super::definition::{
+    ComponentCategory, ComponentDefinition, ComponentId, ComponentSlots, ComponentUnlockRule,
+};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt};
 
@@ -20,6 +22,25 @@ impl ComponentRegistry {
         slots: ComponentSlots,
         function_code: Option<&str>,
     ) -> Result<(), ComponentRegistrationError> {
+        self.register_with_unlock(
+            id,
+            name,
+            category,
+            slots,
+            function_code,
+            ComponentUnlockRule::default(),
+        )
+    }
+
+    pub fn register_with_unlock(
+        &mut self,
+        id: impl Into<String>,
+        name: impl Into<String>,
+        category: ComponentCategory,
+        slots: ComponentSlots,
+        function_code: Option<&str>,
+        unlock: ComponentUnlockRule,
+    ) -> Result<(), ComponentRegistrationError> {
         let id = ComponentId::new(id)?;
         if self.definitions.contains_key(&id) {
             return Err(ComponentRegistrationError::DuplicateId(id));
@@ -33,6 +54,7 @@ impl ComponentRegistry {
                 category,
                 slots,
                 function_code: function_code.map(str::to_owned),
+                unlock,
             },
         );
         Ok(())

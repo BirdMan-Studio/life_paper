@@ -45,6 +45,7 @@ mod tests {
         assert_eq!(registry.len(), 3);
 
         let photosensor = registry.get("photosensor_organ_1").unwrap();
+        assert!(photosensor.unlock.default_unlocked);
         assert_eq!(photosensor.category, ComponentCategory::ExternalOrgan);
         assert_eq!(photosensor.slots.count(ComponentCategory::Body), 1);
         assert_eq!(photosensor.slots.total(), 1);

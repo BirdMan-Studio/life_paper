@@ -45,9 +45,16 @@ async fn main() -> anyhow::Result<()> {
         "data/worlds",
     )?);
     let game_worlds = Arc::clone(&worlds);
+    let organism_model_storage = std::path::PathBuf::from("data/organism_models");
+    std::fs::create_dir_all(&organism_model_storage)?;
 
     let state = AppState {
-        users: db::UserRepository::new(pg_pool),
+        users: db::UserRepository::new(pg_pool.clone()),
+        component_unlocks: db::ComponentUnlockRepository::new(pg_pool.clone()),
+        player_data: db::PlayerDataRepository::new(pg_pool.clone()),
+        organism_models: db::OrganismModelRepository::new(pg_pool),
+        organism_model_storage: Arc::new(organism_model_storage),
+        organism_model_storage_lock: Arc::new(tokio::sync::Mutex::new(())),
         redis_pool,
         elements,
         components,

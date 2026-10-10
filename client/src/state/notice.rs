@@ -1,8 +1,10 @@
 use crate::{api::ApiError, config::Language, i18n::text};
+use std::time::{Duration, Instant};
 
 pub struct Notice {
     pub message: String,
     pub is_error: bool,
+    expires_at: Instant,
 }
 
 impl Notice {
@@ -10,6 +12,7 @@ impl Notice {
         Self {
             message: message.into(),
             is_error: false,
+            expires_at: Instant::now() + Duration::from_secs(4),
         }
     }
 
@@ -17,7 +20,16 @@ impl Notice {
         Self {
             message: message.into(),
             is_error: true,
+            expires_at: Instant::now() + Duration::from_secs(6),
         }
+    }
+
+    pub fn is_expired(&self) -> bool {
+        Instant::now() >= self.expires_at
+    }
+
+    pub fn remaining(&self) -> Duration {
+        self.expires_at.saturating_duration_since(Instant::now())
     }
 
     pub fn from_api_error(language: Language, error: ApiError) -> Self {

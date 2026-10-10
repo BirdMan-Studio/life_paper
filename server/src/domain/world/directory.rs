@@ -168,7 +168,11 @@ impl WorldDirectory {
             "tutorial",
             true,
         )?;
-        self.persist_created_world(&world)?;
+        drop(state);
+        if let Err(error) = self.persist_created_world(&world) {
+            self.remove_world(world.id);
+            return Err(error);
+        }
         Ok(world)
     }
 
@@ -192,8 +196,31 @@ impl WorldDirectory {
             &level_id,
             false,
         )?;
-        self.persist_created_world(&world)?;
+        drop(state);
+        if let Err(error) = self.persist_created_world(&world) {
+            self.remove_world(world.id);
+            return Err(error);
+        }
         Ok(world)
+    }
+
+    fn remove_world(&self, world_id: Uuid) {
+        let mut state = self.state.lock().expect("world directory lock poisoned");
+        let Some(world) = state.worlds.remove(&world_id) else {
+            return;
+        };
+        if world.is_tutorial {
+            state
+                .tutorial_by_user_and_level
+                .retain(|_, id| *id != world_id);
+        }
+        if let Some(path) = self.snapshot_path(world_id) {
+            if let Err(error) = fs::remove_file(path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(target: "world", %error, %world_id, "failed to remove rolled-back world snapshot");
+            }
+        }
     }
 
     pub fn get(&self, world_id: Uuid) -> Option<Arc<WorldInstance>> {
@@ -488,6 +515,31 @@ mod tests {
             directory.create_player_world(7, "x".repeat(MAX_LEVEL_ID_LENGTH + 1), "测试世界"),
             Err(WorldDirectoryError::LevelIdTooLong)
         ));
+    }
+
+    #[test]
+    fn rolls_back_directory_entry_when_initial_snapshot_fails() {
+        let storage_path =
+            std::env::temp_dir().join(format!("life-paper-world-storage-file-{}", Uuid::new_v4()));
+        fs::write(&storage_path, b"not a directory").unwrap();
+        let terrains = Arc::new(create_default_terrain_registry().unwrap());
+        let directory = WorldDirectory {
+            terrains,
+            storage_dir: Some(storage_path.clone()),
+            state: Mutex::new(DirectoryState {
+                worlds: BTreeMap::new(),
+                tutorial_by_user_and_level: HashMap::new(),
+            }),
+        };
+
+        assert!(matches!(
+            directory.create_player_world(7, "test_level", "测试世界"),
+            Err(WorldDirectoryError::Storage(_))
+        ));
+        assert!(directory.list_for_user(7).is_empty());
+        assert!(directory.active_worlds().is_empty());
+
+        fs::remove_file(storage_path).unwrap();
     }
 
     #[test]

@@ -165,8 +165,18 @@ async fn delete_account(
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
     let session = authenticate(&state, &headers).await?;
-    revoke_all_sessions(&state, session.user_id).await?;
-    state.worlds.remove_for_user(session.user_id);
+    let _storage_guard = state.organism_model_storage_lock.lock().await;
+    let model_ids: Vec<_> = state
+        .organism_models
+        .list_for_user(session.user_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(target: "api", %error, user_id = session.user_id, "failed to list organism models before account deletion");
+            ApiError::Internal
+        })?
+        .into_iter()
+        .map(|model| model.id)
+        .collect();
 
     let deleted = state.users.delete(session.user_id).await.map_err(|error| {
         tracing::error!(target: "api", %error, user_id = session.user_id, "failed to delete account");
@@ -176,6 +186,19 @@ async fn delete_account(
     if !deleted {
         return Err(ApiError::Unauthorized);
     }
+
+    // Only remove in-memory and on-disk worlds after the account deletion
+    // succeeds, so a database failure cannot destroy user data.
+    state.worlds.remove_for_user(session.user_id);
+    for model_id in model_ids {
+        let folder = state.organism_model_storage.join(model_id.to_string());
+        if let Err(error) = tokio::fs::remove_dir_all(folder).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(target: "api", %error, %model_id, "failed to remove organism model folder after account deletion");
+        }
+    }
+    revoke_all_sessions(&state, session.user_id).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
