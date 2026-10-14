@@ -27,26 +27,19 @@
 
 ### 客户端
 
-- **Rust** — 客户端主要开发语言
-- **eframe / egui** — 桌面客户端与 2D UI
-- **Reqwest** — HTTP API 客户端
-- **Tokio** — 后台异步请求
-- **keyring** — 使用操作系统凭据库保存登录 token
-- **TOML / Serde** — 客户端配置与本地化数据
+- **Vue 3 / Vite** — 前端界面
+- **Three.js** — 世界场景可视化
+- **Tauri 2** — 桌面客户端容器
 
 ## 项目结构
 
 ```text
 life_paper/
 ├── client/
-│   ├── i18n/             # zh_CN、en_US 本地化文本
-│   └── src/
-│       ├── api/          # 服务端 API 客户端
-│       ├── components/   # 顶栏、侧栏、地图等公共组件
-│       ├── pages/        # 登录、设置、世界等页面
-│       ├── state/        # Session、token 和全局消息状态
-│       ├── app.rs        # 客户端根组件与页面路由
-│       └── main.rs
+│   ├── src/              # Vue 页面、组件、状态和 API 客户端
+│   ├── src-tauri/        # Tauri 2 桌面壳
+│   ├── package.json
+│   └── vite.config.js
 ├── server/
 │   ├── migrations/       # PostgreSQL 初始化迁移
 │   └── src/
@@ -61,6 +54,50 @@ life_paper/
 ```
 
 ## 快速开始
+
+### Tauri + Vue 客户端
+
+客户端使用 Vue 3、Vite、Three.js 和 Tauri 2，调用 `/api/v1` 服务端接口。
+
+```powershell
+cd client
+npm install
+npm run dev          # 浏览器预览
+npx tauri dev       # Tauri 桌面窗口
+```
+
+运行 Tauri 前必须先在另一个终端启动 API 服务：
+
+```powershell
+cd server
+cargo run
+```
+
+确认 `http://127.0.0.1:8080/` 能访问后，再启动前端。如果出现 `Failed to fetch`，请检查服务端是否已启动以及连接设置中的地址和端口。
+
+生产构建：
+
+```powershell
+npm run build
+npx tauri build
+```
+
+客户端结构：
+
+```text
+client/src/
+├── api/         # HTTP 请求、Bearer token、接口错误
+├── stores/      # session 与世界/玩家/模型/组件状态
+├── components/  # AppShell、Sidebar、TopBar、Three.js 场景
+├── views/       # 登录、世界、生物、模型、设置页面
+└── App.vue      # 路由与页面编排
+```
+
+业务数据来自服务端 API：登录后加载 `/account/me`、`/worlds`、`/player/data`、`/organism-models` 和 `/organism-components/unlocked`。服务端尚未提供生物实例列表、世界 tick、地图数据和活动日志接口；当前 `WorldScene` 只是静态视觉占位，不代表真实世界状态。
+
+客户端默认连接 `http://127.0.0.1:8080/api/v1`，可通过登录页右下角的连接设置修改。
+
+`client/src-tauri/Cargo.toml` 已声明独立 `[workspace]`，因此 Tauri 不会被根目录 Rust workspace 包含。
 
 ### 环境要求
 
@@ -89,15 +126,7 @@ cargo run
 http://127.0.0.1:8080/api/v1
 ```
 
-### 启动客户端
-
-在项目根目录运行：
-
-```powershell
-cargo run -p client
-```
-
-客户端可以在设置页面修改服务器地址和界面语言。
+登录页右下角可以修改服务器地址；登录后的设置页面可以修改界面语言。
 
 ## 配置说明
 
@@ -126,7 +155,7 @@ http://127.0.0.1:8080/api/v1
 - PostgreSQL 只保存 `password_hash`，不保存明文密码。
 - 登录 session 存储在 Redis，并具有过期时间。
 - 客户端不会保存用户密码。
-- 客户端使用操作系统凭据库保存 token。
+- 客户端当前使用浏览器本地存储保存 token；不要在不受信任的设备上保留登录状态。
 - 客户端启动时通过 `GET /account/me` 验证并恢复登录状态。
 - 退出登录、注销账号、token 失效或切换服务器时会清除本地 token。
 
@@ -139,10 +168,10 @@ http://127.0.0.1:8080/api/v1
 - 用户注册、登录、退出登录和注销账号
 - Redis session 创建、过期及全量撤销
 - 当前账号信息查询接口
-- 基于 eframe / egui 的桌面客户端
+- 基于 Vue / Tauri 的桌面客户端
 - 登录、注册、设置和世界概览页面
 - `zh_CN`、`en_US` 界面本地化
-- 系统凭据库 token 保存及自动登录恢复
+- 本地 token 保存及自动登录恢复
 - v1 API 文档基础结构
 
 尚未完成：

@@ -1,6 +1,7 @@
 use super::auth;
 use crate::state::AppState;
 use axum::{Router, routing::get};
+use tower_http::cors::CorsLayer;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -10,6 +11,7 @@ pub fn router(state: AppState) -> Router {
         .nest("/api/v1", super::organism_model::routes())
         .nest("/api/v1", super::player::routes())
         .nest("/api/v1", super::world::routes())
+        .layer(CorsLayer::permissive())
         .with_state(state)
 }
 

@@ -1,0 +1,18 @@
+[package]
+name = "life-paper"
+version = "0.1.0"
+description = "Life Paper evolution laboratory"
+authors = ["Life Paper"]
+edition = "2021"
+
+# Keep the Tauri shell independent from the server workspace.
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
