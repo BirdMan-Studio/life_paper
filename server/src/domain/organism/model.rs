@@ -1,5 +1,8 @@
 use super::program::OrganismProgramId;
-use crate::domain::organism_component::{ComponentCategory, ComponentId, ComponentRegistry};
+use crate::domain::{
+    MapPosition,
+    organism_component::{ComponentCategory, ComponentId, ComponentRegistry},
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -7,10 +10,58 @@ use std::{
 };
 use uuid::Uuid;
 
+pub const ORGANISM_SCHEMA_VERSION: u16 = 1;
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ComponentSize {
+    pub width_px: u32,
+    pub length_px: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ComponentPlacement {
+    /// Bodies and surface organs have an explicit map position. Internal organs
+    /// are placed inside their host body and therefore omit this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<MapPosition>,
+    /// Rotation in thousandths of a degree. Integer storage keeps model JSON deterministic.
+    pub rotation_mdeg: i32,
+    pub size: ComponentSize,
+    #[serde(default)]
+    pub host_body: Option<Uuid>,
+    #[serde(default)]
+    pub surface_anchor: Option<SurfaceAnchor>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SurfaceAnchor {
+    /// Position along the host body's perimeter in parts per million.
+    pub perimeter_ppm: u32,
+}
+
+impl Default for SurfaceAnchor {
+    fn default() -> Self {
+        Self { perimeter_ppm: 0 }
+    }
+}
+
+impl SurfaceAnchor {
+    pub const MAX_PERIMETER_PPM: u32 = 1_000_000;
+
+    pub fn new(perimeter_ppm: u32) -> Result<Self, OrganismError> {
+        if perimeter_ppm > Self::MAX_PERIMETER_PPM {
+            return Err(OrganismError::InvalidSurfaceAnchor(perimeter_ppm));
+        }
+        Ok(Self { perimeter_ppm })
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ComponentInstance {
     pub id: Uuid,
     pub component: ComponentId,
+    #[serde(default)]
+    pub placement: ComponentPlacement,
 }
 
 impl ComponentInstance {
@@ -25,6 +76,7 @@ impl ComponentInstance {
         Ok(Self {
             id: Uuid::new_v4(),
             component: definition.id.clone(),
+            placement: ComponentPlacement::default(),
         })
     }
 }
@@ -52,8 +104,12 @@ impl ComponentConnection {
 /// 由组件节点和连接组成的生物。未连接的槽位自然保持为空。
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct BiologicalOrganism {
+    #[serde(default = "current_schema_version")]
+    pub schema_version: u16,
     pub id: Uuid,
     pub program_id: OrganismProgramId,
+    #[serde(default)]
+    pub root_body: Option<Uuid>,
     pub components: BTreeMap<Uuid, ComponentInstance>,
     pub connections: BTreeSet<ComponentConnection>,
 }
@@ -61,8 +117,10 @@ pub struct BiologicalOrganism {
 impl BiologicalOrganism {
     pub fn new(program_id: OrganismProgramId) -> Self {
         Self {
+            schema_version: ORGANISM_SCHEMA_VERSION,
             id: Uuid::new_v4(),
             program_id,
+            root_body: None,
             components: BTreeMap::new(),
             connections: BTreeSet::new(),
         }
@@ -75,6 +133,13 @@ impl BiologicalOrganism {
     ) -> Result<Uuid, OrganismError> {
         let instance = ComponentInstance::new(component, registry)?;
         let id = instance.id;
+        if self.root_body.is_none()
+            && registry
+                .get(instance.component.as_str())
+                .is_some_and(|definition| definition.category == ComponentCategory::Body)
+        {
+            self.root_body = Some(id);
+        }
         self.components.insert(id, instance);
         Ok(id)
     }
@@ -191,6 +256,7 @@ pub enum OrganismError {
         instance: Uuid,
         accepts: ComponentCategory,
     },
+    InvalidSurfaceAnchor(u32),
 }
 
 impl fmt::Display for OrganismError {
@@ -214,8 +280,18 @@ impl fmt::Display for OrganismError {
                     "component {instance} has no available slot for {accepts:?}"
                 )
             }
+            Self::InvalidSurfaceAnchor(value) => {
+                write!(
+                    formatter,
+                    "surface anchor must be between 0 and 1000000 ppm: {value}"
+                )
+            }
         }
     }
+}
+
+fn current_schema_version() -> u16 {
+    ORGANISM_SCHEMA_VERSION
 }
 
 impl std::error::Error for OrganismError {}
@@ -242,6 +318,26 @@ mod tests {
         assert_eq!(organism.connections.len(), 2);
         assert_eq!(organism.connection_count(body), 2);
         assert_eq!(organism.connection_count(sensor), 1);
+    }
+
+    #[test]
+    fn defaults_new_placement_and_schema_version() {
+        let registry = create_default_component_registry().unwrap();
+        let organism = BiologicalOrganism::new(OrganismProgramId::new());
+        assert_eq!(organism.schema_version, ORGANISM_SCHEMA_VERSION);
+        let mut organism = organism;
+        let body = organism.add_component("small_body_1", &registry).unwrap();
+        assert_eq!(organism.root_body, Some(body));
+        assert_eq!(
+            organism.components[&body].placement,
+            ComponentPlacement::default()
+        );
+    }
+
+    #[test]
+    fn validates_normalized_surface_anchor() {
+        assert!(SurfaceAnchor::new(SurfaceAnchor::MAX_PERIMETER_PPM).is_ok());
+        assert!(SurfaceAnchor::new(SurfaceAnchor::MAX_PERIMETER_PPM + 1).is_err());
     }
 
     #[test]

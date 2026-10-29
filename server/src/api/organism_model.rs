@@ -2,8 +2,8 @@ use super::{auth::authenticate, error::ApiError};
 use crate::{
     db::OrganismModelRecord,
     domain::{
-        BiologicalOrganism, ComponentCategory, ComponentInstance, ComponentRegistry,
-        OrganismProgramId,
+        BiologicalOrganism, ComponentCategory, ComponentInstance, ComponentPlacement,
+        ComponentRegistry, OrganismProgramId,
     },
     state::AppState,
 };
@@ -59,6 +59,8 @@ struct CreateModelRequest {
 struct ComponentRequest {
     id: Uuid,
     component_id: String,
+    #[serde(default)]
+    placement: ComponentPlacement,
 }
 
 #[derive(Deserialize)]
@@ -145,6 +147,7 @@ async fn create_model(
                 ComponentInstance {
                     id: item.id,
                     component: definition.id.clone(),
+                    placement: item.placement,
                 },
             )
             .is_some()
@@ -152,6 +155,13 @@ async fn create_model(
             return Err(ApiError::BadRequest("组件实例 ID 不能重复".to_string()));
         }
     }
+    organism.root_body = organism.components.iter().find_map(|(id, instance)| {
+        state
+            .components
+            .get(instance.component.as_str())
+            .is_some_and(|definition| definition.category == ComponentCategory::Body)
+            .then_some(*id)
+    });
     for connection in request.connections {
         organism
             .connect(connection.first, connection.second, &state.components)
@@ -163,6 +173,8 @@ async fn create_model(
         ));
     }
 
+    crate::domain::organism_component::normalize_placements(&mut organism, &state.components)
+        .map_err(ApiError::BadRequest)?;
     let composition = serde_json::to_value(&organism).map_err(|error| {
         tracing::error!(target: "api", %error, "failed to serialize organism model");
         ApiError::Internal

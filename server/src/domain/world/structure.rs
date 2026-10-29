@@ -1,7 +1,7 @@
 use crate::domain::terrain::TerrainId;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MapPosition {
     pub x: i32,
     pub y: i32,

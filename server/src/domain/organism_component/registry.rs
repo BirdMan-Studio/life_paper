@@ -49,6 +49,7 @@ impl ComponentRegistry {
         self.definitions.insert(
             id.clone(),
             ComponentDefinition {
+                model: super::ComponentModel::for_category(category),
                 id,
                 name: name.into(),
                 category,
@@ -62,6 +63,22 @@ impl ComponentRegistry {
 
     pub fn get(&self, id: &str) -> Option<&ComponentDefinition> {
         self.definitions.get(id)
+    }
+
+    pub fn set_model(
+        &mut self,
+        id: &str,
+        model: super::ComponentModel,
+    ) -> Result<(), ComponentRegistrationError> {
+        let definition = self
+            .definitions
+            .get_mut(id)
+            .ok_or_else(|| ComponentRegistrationError::InvalidModel(id.into()))?;
+        if !model.valid_for(definition.category) {
+            return Err(ComponentRegistrationError::InvalidModel(id.into()));
+        }
+        definition.model = model;
+        Ok(())
     }
 
     pub fn contains(&self, id: &str) -> bool {
@@ -83,6 +100,7 @@ impl ComponentRegistry {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ComponentRegistrationError {
+    InvalidModel(String),
     InvalidId(String),
     DuplicateId(ComponentId),
 }
@@ -90,6 +108,7 @@ pub enum ComponentRegistrationError {
 impl fmt::Display for ComponentRegistrationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidModel(id) => write!(formatter, "invalid component model: {id}"),
             Self::InvalidId(id) => write!(formatter, "invalid component id: {id}"),
             Self::DuplicateId(id) => write!(formatter, "component id already registered: {id}"),
         }

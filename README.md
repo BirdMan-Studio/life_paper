@@ -55,25 +55,60 @@ life_paper/
 
 ## 快速开始
 
-### Tauri + Vue 客户端
+### 启动顺序
 
-客户端使用 Vue 3、Vite、Three.js 和 Tauri 2，调用 `/api/v1` 服务端接口。
+项目运行需要 PostgreSQL、Redis、Rust 和 Node.js。开发时建议按下面的顺序启动：
 
-```powershell
-cd client
-npm install
-npm run dev          # 浏览器预览
-npx tauri dev       # Tauri 桌面窗口
-```
+1. 启动 PostgreSQL 和 Redis。
+2. 首次启动服务端，生成并填写配置文件。
+3. 再次启动服务端，等待 API 监听 `8080` 端口。
+4. 启动 Vue 开发客户端，或启动 Tauri 桌面客户端。
 
-运行 Tauri 前必须先在另一个终端启动 API 服务：
+### 1. 首次配置并启动服务端
+
+服务端使用 PostgreSQL 保存持久化数据，使用 Redis 保存登录 session。先确认两个服务已经运行，然后执行：
 
 ```powershell
 cd server
 cargo run
 ```
 
-确认 `http://127.0.0.1:8080/` 能访问后，再启动前端。如果出现 `Failed to fetch`，请检查服务端是否已启动以及连接设置中的地址和端口。
+如果 `server/config.toml` 不存在，程序会生成配置模板并退出。编辑该文件，填写 PostgreSQL 和 Redis 配置后，再次启动：
+
+```powershell
+cargo run
+```
+
+首次初始化使用 `safe_mode = false`。数据库迁移和运行账号创建完成后，建议切换为 `safe_mode = true`，再重启服务端。
+
+默认 API 地址为：
+
+```text
+http://127.0.0.1:8080/api/v1
+```
+
+### 2. 启动 Vue 客户端
+
+另开一个终端，安装依赖并启动 Vite：
+
+```powershell
+cd client
+npm install
+npm run dev
+```
+
+浏览器访问 Vite 输出的地址，通常是 `http://127.0.0.1:1420/`。客户端默认连接上面的 API 地址。如果出现 `Failed to fetch`，请先检查服务端、PostgreSQL、Redis 是否正常运行。
+
+### 3. 启动 Tauri 客户端
+
+Tauri 运行前必须先启动服务端，并保持服务端终端运行：
+
+```powershell
+cd client
+npx tauri dev
+```
+
+客户端登录页右下角可以修改服务器地址。浏览器开发模式和 Tauri 客户端使用同一套服务端 API。
 
 生产构建：
 

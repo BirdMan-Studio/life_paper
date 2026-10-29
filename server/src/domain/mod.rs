@@ -13,8 +13,9 @@ pub use element::{
 };
 pub use matter::{ElementMixture, MatterEntity, MatterError, MatterStructure};
 pub use organism::{
-    BiologicalOrganism, ComponentConnection, ComponentInstance, OrganismError, OrganismProgram,
-    OrganismProgramId, ProgramFolderRecord,
+    BiologicalOrganism, ComponentConnection, ComponentInstance, ComponentPlacement, ComponentSize,
+    ORGANISM_SCHEMA_VERSION, OrganismError, OrganismProgram, OrganismProgramId,
+    ProgramFolderRecord, SurfaceAnchor,
 };
 pub use organism_component::{
     ComponentCategory, ComponentDefinition, ComponentId, ComponentRegistrationError,
