@@ -39,7 +39,7 @@ impl fmt::Display for OrganismProgramId {
     }
 }
 
-/// 玩家程序目录记录。服务端只保存记录，不读取或执行目录中的代码。
+/// Persisted program directory; the entry point is always main.py.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProgramFolderRecord {
     pub program_id: OrganismProgramId,

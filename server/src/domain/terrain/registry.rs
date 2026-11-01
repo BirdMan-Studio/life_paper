@@ -1,4 +1,4 @@
-use super::definition::{TerrainDefinition, TerrainId};
+use super::definition::{TerrainDefinition, TerrainId, TerrainVisual};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt};
 
@@ -35,9 +35,18 @@ impl TerrainRegistry {
                 blocks_movement,
                 generates_oxygen,
                 generated_matter_recipe: generated_matter_recipe.map(str::to_owned),
+                visual: TerrainVisual::default(),
             },
         );
         Ok(())
+    }
+
+    pub fn set_visual(&mut self, id: &str, visual: TerrainVisual) -> bool {
+        let Some(definition) = self.definitions.get_mut(id) else {
+            return false;
+        };
+        definition.visual = visual;
+        true
     }
 
     pub fn get(&self, id: &str) -> Option<&TerrainDefinition> {

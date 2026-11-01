@@ -10,11 +10,13 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct AppState {
+    pub ai_runtime: Arc<crate::game::ai::AiRuntime>,
     pub users: UserRepository,
     pub component_unlocks: ComponentUnlockRepository,
     pub player_data: PlayerDataRepository,
     pub organism_models: OrganismModelRepository,
     pub organism_model_storage: Arc<PathBuf>,
+    pub organism_instance_storage: Arc<PathBuf>,
     pub organism_model_storage_lock: Arc<tokio::sync::Mutex<()>>,
     pub redis_pool: RedisPool,
     pub elements: Arc<ElementRegistry>,

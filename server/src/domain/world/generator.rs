@@ -1,4 +1,7 @@
-use super::{MapPosition, World, WorldGenerationError, WorldGeneratorEditor};
+use super::{
+    GroundGenerationConfig, MapPosition, TerrainArea, World, WorldGenerationError,
+    WorldGeneratorEditor,
+};
 use crate::domain::terrain::TerrainRegistry;
 
 pub const BASIC_WORLD_SIZE_PX: u32 = 10_000;
@@ -30,7 +33,16 @@ pub fn generate_basic_world(terrains: &TerrainRegistry) -> Result<World, WorldGe
             "wall",
         )?;
 
-    Ok(editor.build())
+    let ground = GroundGenerationConfig {
+        seed: 0x4c_494645_50415045,
+        area: Some(TerrainArea::Rectangle {
+            origin,
+            size_x_px: BASIC_WORLD_SIZE_PX,
+            size_y_px: BASIC_WORLD_SIZE_PX,
+        }),
+        ..GroundGenerationConfig::default()
+    };
+    Ok(editor.build().with_ground(ground))
 }
 
 #[cfg(test)]
@@ -74,5 +86,12 @@ mod tests {
                 .as_str(),
             "wall"
         );
+
+        let first = world.ground_properties(MapPosition { x: 123, y: 456 });
+        assert_eq!(
+            first,
+            world.ground_properties(MapPosition { x: 123, y: 456 })
+        );
+        assert!(world.ground_config().is_some());
     }
 }

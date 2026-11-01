@@ -7,7 +7,7 @@ const assert = require('node:assert/strict');
     const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
-    await page.goto('http://127.0.0.1:1420/');
+    await page.goto(process.env.WORLD_TEST_URL || 'http://127.0.0.1:1421/');
     await page.evaluate(async () => {
       const source = await (await fetch('/src/components/OrganismAssembler.vue')).text();
       const { createApp, h, ref } = await import(source.match(/from\s+["']([^"']*\/vue\.js[^"']*)["']/)[1]);

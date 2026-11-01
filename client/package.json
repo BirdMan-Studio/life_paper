@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "desktop": "tauri dev --no-dev-server",
     "build": "vite build",
     "preview": "vite preview",
     "tauri": "tauri"

@@ -1,10 +1,49 @@
 use serde::Deserialize;
+use std::path::{Path, PathBuf};
+
+/// Repository-root and server-directory launches resolve the same config.
+pub fn locate_config(working_dir: &Path, executable_dir: &Path) -> PathBuf {
+    [
+        working_dir.join("config.toml"),
+        working_dir.join("server/config.toml"),
+        executable_dir.join("config.toml"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
+    .unwrap_or_else(|| working_dir.join("config.toml"))
+}
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
+    #[serde(default)]
+    pub ai: AiConfig,
     pub server: ServerConfig,
     pub postgres: PostgresConfig,
     pub redis: RedisConfig,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct AiConfig {
+    pub enabled: bool,
+    pub python: String,
+    pub timeout_ms: u64,
+    pub max_queries: usize,
+    pub workers: usize,
+    pub cache_entries: usize,
+}
+
+impl Default for AiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            python: "python".into(),
+            timeout_ms: 2000,
+            max_queries: 256,
+            workers: 2,
+            cache_entries: 8,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -35,6 +74,15 @@ pub struct RedisConfig {
 const DEFAULT_CONFIG: &str = r#"[server]
 host = "0.0.0.0"
 port = 8080
+
+# Python worker executes trusted player code with this server account's OS permissions.
+[ai]
+enabled = false
+python = "python"
+timeout_ms = 2000
+max_queries = 256
+workers = 2
+cache_entries = 8
 
 # ===== PostgreSQL 配置 =====
 [postgres]
@@ -88,17 +136,19 @@ const REQUIRED_FIELDS: &[(&str, &str)] = &[
 ];
 
 impl Config {
-    pub fn load_or_create(path: &str) -> anyhow::Result<Self> {
+    pub fn load_or_create(path: impl AsRef<Path>) -> anyhow::Result<Self> {
+        let path = path.as_ref();
+        let display_path = path.display();
         // 文件不存在：生成模板，提示用户修改后重启，然后退出
         if !std::path::Path::new(path).exists() {
             std::fs::write(path, DEFAULT_CONFIG)?;
             tracing::warn!(
                 target: "config",
-                "config file not found, generated default template at {path}"
+                "config file not found, generated default template at {display_path}"
             );
             tracing::warn!(
                 target: "config",
-                "please edit {path} and restart the server"
+                "please edit {display_path} and restart the server"
             );
             std::process::exit(0);
         }
@@ -135,5 +185,46 @@ impl Config {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ai_config_is_optional_and_partially_configurable() {
+        let config: AiConfig = toml::from_str("enabled = true").unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.python, "python");
+        assert_eq!(config.timeout_ms, 2000);
+        let value: toml::Value = toml::from_str(DEFAULT_CONFIG).unwrap();
+        let mut value = value;
+        value.as_table_mut().unwrap().remove("ai");
+        let legacy: Config = value.try_into().unwrap();
+        assert!(!legacy.ai.enabled);
+    }
+
+    #[test]
+    fn repository_and_server_launches_share_config_and_data_directory() {
+        let root = std::env::temp_dir().join(format!("life-paper-paths-{}", uuid::Uuid::new_v4()));
+        let server = root.join("server");
+        let executable = root.join("target/debug");
+        std::fs::create_dir_all(&server).unwrap();
+        std::fs::create_dir_all(&executable).unwrap();
+        std::fs::write(server.join("config.toml"), DEFAULT_CONFIG).unwrap();
+        let from_root = std::fs::canonicalize(locate_config(&root, &executable)).unwrap();
+        let from_server = std::fs::canonicalize(locate_config(&server, &executable)).unwrap();
+        assert_eq!(from_root, from_server);
+        assert_eq!(
+            from_root.parent().unwrap().join("data/worlds"),
+            std::fs::canonicalize(&server).unwrap().join("data/worlds")
+        );
+        std::fs::write(executable.join("config.toml"), DEFAULT_CONFIG).unwrap();
+        assert_eq!(
+            locate_config(&root.join("other"), &executable),
+            executable.join("config.toml")
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

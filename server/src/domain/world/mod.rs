@@ -12,4 +12,7 @@ pub use generator::{
     BASIC_WORLD_SIZE_PX, BASIC_WORLD_WALL_THICKNESS_PX, BASIC_WORLD_WATER_RADIUS_PX,
     generate_basic_world,
 };
-pub use structure::{MapPosition, TerrainArea, TerrainLayer, World};
+pub use structure::{
+    GroundGenerationConfig, GroundProperties, GroundTerrainProfile, MapPosition, TerrainArea,
+    TerrainLayer, World,
+};

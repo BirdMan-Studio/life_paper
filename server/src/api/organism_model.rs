@@ -17,7 +17,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::{Component, PathBuf},
 };
 use uuid::Uuid;
@@ -37,6 +37,22 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             "/organism-models/{model_id}/entries",
+            delete(delete_entry).patch(rename_entry),
+        )
+        .route(
+            "/worlds/{world_id}/organisms/{organism_id}/folder",
+            get(list_folder),
+        )
+        .route(
+            "/worlds/{world_id}/organisms/{organism_id}/folders",
+            post(create_folder),
+        )
+        .route(
+            "/worlds/{world_id}/organisms/{organism_id}/files",
+            get(read_file).put(upload_file),
+        )
+        .route(
+            "/worlds/{world_id}/organisms/{organism_id}/entries",
             delete(delete_entry).patch(rename_entry),
         )
         .layer(DefaultBodyLimit::max(MAX_FILE_SIZE))
@@ -276,12 +292,12 @@ struct FolderEntry {
 async fn list_folder(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(model_id): Path<Uuid>,
+    Path(ids): Path<BTreeMap<String, Uuid>>,
     Query(query): Query<EntryPathQuery>,
 ) -> Result<Json<DataResponse<Vec<FolderEntry>>>, ApiError> {
     let session = authenticate(&state, &headers).await?;
-    ensure_owned(&state, model_id, session.user_id).await?;
-    let (_, target) = model_path(&state, model_id, &query.path, true)?;
+    let _storage_guard = state.organism_model_storage_lock.lock().await;
+    let (_, target) = program_path(&state, &ids, session.user_id, &query.path, true).await?;
     let mut reader = tokio::fs::read_dir(&target)
         .await
         .map_err(map_entry_error)?;
@@ -308,13 +324,12 @@ async fn list_folder(
 async fn create_folder(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(model_id): Path<Uuid>,
+    Path(ids): Path<BTreeMap<String, Uuid>>,
     Json(request): Json<CreateFolderRequest>,
 ) -> Result<StatusCode, ApiError> {
     let session = authenticate(&state, &headers).await?;
     let _storage_guard = state.organism_model_storage_lock.lock().await;
-    ensure_owned(&state, model_id, session.user_id).await?;
-    let (_, target) = model_path(&state, model_id, &request.path, false)?;
+    let (_, target) = program_path(&state, &ids, session.user_id, &request.path, false).await?;
     tokio::fs::create_dir_all(target).await.map_err(fs_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -322,14 +337,13 @@ async fn create_folder(
 async fn upload_file(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(model_id): Path<Uuid>,
+    Path(ids): Path<BTreeMap<String, Uuid>>,
     Query(query): Query<EntryPathQuery>,
     body: Bytes,
 ) -> Result<StatusCode, ApiError> {
     let session = authenticate(&state, &headers).await?;
     let _storage_guard = state.organism_model_storage_lock.lock().await;
-    ensure_owned(&state, model_id, session.user_id).await?;
-    let (_, target) = model_path(&state, model_id, &query.path, false)?;
+    let (_, target) = program_path(&state, &ids, session.user_id, &query.path, false).await?;
     if let Some(parent) = target.parent() {
         tokio::fs::create_dir_all(parent).await.map_err(fs_error)?;
     }
@@ -340,12 +354,12 @@ async fn upload_file(
 async fn read_file(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(model_id): Path<Uuid>,
+    Path(ids): Path<BTreeMap<String, Uuid>>,
     Query(query): Query<EntryPathQuery>,
 ) -> Result<Bytes, ApiError> {
     let session = authenticate(&state, &headers).await?;
-    ensure_owned(&state, model_id, session.user_id).await?;
-    let (_, target) = model_path(&state, model_id, &query.path, false)?;
+    let _storage_guard = state.organism_model_storage_lock.lock().await;
+    let (_, target) = program_path(&state, &ids, session.user_id, &query.path, false).await?;
     let metadata = tokio::fs::metadata(&target)
         .await
         .map_err(map_entry_error)?;
@@ -361,13 +375,13 @@ async fn read_file(
 async fn delete_entry(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(model_id): Path<Uuid>,
+    Path(ids): Path<BTreeMap<String, Uuid>>,
     Query(query): Query<EntryPathQuery>,
 ) -> Result<StatusCode, ApiError> {
     let session = authenticate(&state, &headers).await?;
+    protect_instance_entry(&ids, &query.path)?;
     let _storage_guard = state.organism_model_storage_lock.lock().await;
-    ensure_owned(&state, model_id, session.user_id).await?;
-    let (_, target) = model_path(&state, model_id, &query.path, false)?;
+    let (_, target) = program_path(&state, &ids, session.user_id, &query.path, false).await?;
     let metadata = tokio::fs::metadata(&target)
         .await
         .map_err(map_entry_error)?;
@@ -382,13 +396,13 @@ async fn delete_entry(
 async fn rename_entry(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(model_id): Path<Uuid>,
+    Path(ids): Path<BTreeMap<String, Uuid>>,
     Json(request): Json<RenameEntryRequest>,
 ) -> Result<StatusCode, ApiError> {
     let session = authenticate(&state, &headers).await?;
+    protect_instance_entry(&ids, &request.path)?;
     let _storage_guard = state.organism_model_storage_lock.lock().await;
-    ensure_owned(&state, model_id, session.user_id).await?;
-    let (_, source) = model_path(&state, model_id, &request.path, false)?;
+    let (_, source) = program_path(&state, &ids, session.user_id, &request.path, false).await?;
     let name = request.name.trim();
     if !is_safe_entry_name(name) {
         return Err(ApiError::BadRequest(
@@ -468,15 +482,65 @@ async fn ensure_owned(state: &AppState, model_id: Uuid, user_id: i64) -> Result<
         .ok_or(ApiError::NotFound)
 }
 
-fn model_path(
+async fn program_path(
     state: &AppState,
-    model_id: Uuid,
+    ids: &BTreeMap<String, Uuid>,
+    user_id: i64,
     path: &str,
     allow_root: bool,
 ) -> Result<(PathBuf, PathBuf), ApiError> {
     let relative = safe_relative_path(path, allow_root)?;
-    let root = state.organism_model_storage.join(model_id.to_string());
-    Ok((root.clone(), root.join(relative)))
+    let root = if let Some(model_id) = ids.get("model_id") {
+        ensure_owned(state, *model_id, user_id).await?;
+        state.organism_model_storage.join(model_id.to_string())
+    } else {
+        let world_id = *ids.get("world_id").ok_or(ApiError::NotFound)?;
+        let organism_id = *ids.get("organism_id").ok_or(ApiError::NotFound)?;
+        let worlds = state.worlds.clone();
+        tokio::task::spawn_blocking(move || {
+            let world = worlds
+                .read_world(world_id, user_id)
+                .map_err(super::world::map_world_error)?;
+            match world.organisms.get(&organism_id) {
+                Some(organism) if organism.owner_user_id == user_id => Ok(()),
+                _ => Err(ApiError::NotFound),
+            }
+        })
+        .await
+        .map_err(|_| ApiError::Internal)??;
+        let root = state
+            .organism_instance_storage
+            .join(organism_id.to_string());
+        // Older instances receive an empty independent program, never the current model code.
+        crate::domain::organism::program_storage::ensure_entry(&root).map_err(fs_error)?;
+        root
+    };
+    let target = crate::domain::organism::program_storage::checked_path(
+        &root,
+        &relative.to_string_lossy(),
+        allow_root,
+    )
+    .map_err(|error| {
+        if error.kind() == std::io::ErrorKind::InvalidInput {
+            ApiError::BadRequest(error.to_string())
+        } else {
+            fs_error(error)
+        }
+    })?;
+    Ok((root, target))
+}
+
+fn protect_instance_entry(ids: &BTreeMap<String, Uuid>, path: &str) -> Result<(), ApiError> {
+    if ids.contains_key("organism_id")
+        && safe_relative_path(path, false)?
+            .to_string_lossy()
+            .eq_ignore_ascii_case("main.py")
+    {
+        return Err(ApiError::BadRequest(
+            "实例入口 main.py 不能删除或重命名".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn safe_relative_path(path: &str, allow_root: bool) -> Result<PathBuf, ApiError> {
@@ -494,7 +558,13 @@ fn safe_relative_path(path: &str, allow_root: bool) -> Result<PathBuf, ApiError>
 }
 
 fn is_safe_entry_name(name: &str) -> bool {
-    !name.is_empty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\\')
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains(':')
+        && !name.ends_with(['.', ' '])
 }
 
 fn db_error(error: sqlx::Error) -> ApiError {
@@ -544,6 +614,18 @@ mod tests {
         assert!(!is_safe_entry_name(".."));
         assert!(!is_safe_entry_name("src/main.rs"));
         assert!(!is_safe_entry_name("src\\main.rs"));
+        assert!(!is_safe_entry_name("main.py:stream"));
+        assert!(!is_safe_entry_name("main.py."));
+    }
+
+    #[test]
+    fn instance_entry_is_fixed_but_helpers_are_editable() {
+        let ids = BTreeMap::from([("organism_id".to_string(), Uuid::new_v4())]);
+        assert!(protect_instance_entry(&ids, "main.py").is_err());
+        assert!(protect_instance_entry(&ids, "MAIN.PY").is_err());
+        assert!(protect_instance_entry(&ids, "brain.py").is_ok());
+        assert!(protect_instance_entry(&ids, "lib/main.py").is_ok());
+        assert!(protect_instance_entry(&BTreeMap::new(), "main.py").is_ok());
     }
 
     #[test]

@@ -49,6 +49,7 @@ impl ComponentRegistry {
         self.definitions.insert(
             id.clone(),
             ComponentDefinition {
+                properties: super::ComponentProperties::default(),
                 model: super::ComponentModel::for_category(category),
                 id,
                 name: name.into(),
@@ -83,6 +84,33 @@ impl ComponentRegistry {
 
     pub fn contains(&self, id: &str) -> bool {
         self.definitions.contains_key(id)
+    }
+
+    pub fn set_properties(
+        &mut self,
+        id: &str,
+        properties: super::ComponentProperties,
+    ) -> Result<(), ComponentRegistrationError> {
+        if properties.max_durability == 0
+            || properties.reaction_min_mj_per_tick > properties.reaction_max_mj_per_tick
+            || properties.api.as_ref().is_some_and(|api| {
+                [api.jet.as_ref(), api.absorption.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .any(|rate| {
+                        rate.subdivisions == 0
+                            || rate.max_rate_mg_per_tick == 0
+                            || rate.max_rate_mg_per_tick % rate.subdivisions != 0
+                    })
+            })
+        {
+            return Err(ComponentRegistrationError::InvalidModel(id.into()));
+        }
+        self.definitions
+            .get_mut(id)
+            .ok_or_else(|| ComponentRegistrationError::InvalidModel(id.into()))?
+            .properties = properties;
+        Ok(())
     }
 
     pub fn len(&self) -> usize {

@@ -24,8 +24,19 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(target: "main", "preparing to start server...");
 
     // --- 2. 加载配置 ---
-    let config = Config::load_or_create("config.toml")?;
-    tracing::info!(target: "main", "config loaded");
+    let working_dir = std::env::current_dir()?;
+    let executable = std::env::current_exe()?;
+    let config_path = match std::env::var_os("LIFE_PAPER_CONFIG") {
+        Some(path) => working_dir.join(path),
+        None => config::locate_config(&working_dir, executable.parent().unwrap_or(&working_dir)),
+    };
+    let config = Config::load_or_create(&config_path)?;
+    let config_path = std::fs::canonicalize(config_path)?;
+    let data_dir = config_path
+        .parent()
+        .expect("absolute configuration path")
+        .join("data");
+    tracing::info!(target: "main", config = %config_path.display(), data = %data_dir.display(), "config loaded");
 
     // --- 3. 初始化数据库（PostgreSQL + Redis） ---
     let (pg_pool, redis_pool) = match db::init(&config).await {
@@ -42,18 +53,24 @@ async fn main() -> anyhow::Result<()> {
     let terrains = Arc::new(domain::create_default_terrain_registry()?);
     let worlds = Arc::new(domain::WorldDirectory::new_with_storage(
         Arc::clone(&terrains),
-        "data/worlds",
+        data_dir.join("worlds"),
     )?);
     let game_worlds = Arc::clone(&worlds);
-    let organism_model_storage = std::path::PathBuf::from("data/organism_models");
+    let organism_model_storage = data_dir.join("organism_models");
     std::fs::create_dir_all(&organism_model_storage)?;
+    let organism_instance_storage = data_dir.join("organism_instances");
+    std::fs::create_dir_all(&organism_instance_storage)?;
 
+    let ai_runtime = Arc::new(game::ai::AiRuntime::new(config.ai.clone())?);
+    ai_runtime.warm_up().await?;
     let state = AppState {
+        ai_runtime: ai_runtime.clone(),
         users: db::UserRepository::new(pg_pool.clone()),
         component_unlocks: db::ComponentUnlockRepository::new(pg_pool.clone()),
         player_data: db::PlayerDataRepository::new(pg_pool.clone()),
         organism_models: db::OrganismModelRepository::new(pg_pool),
         organism_model_storage: Arc::new(organism_model_storage),
+        organism_instance_storage: Arc::new(organism_instance_storage),
         organism_model_storage_lock: Arc::new(tokio::sync::Mutex::new(())),
         redis_pool,
         elements,
@@ -62,6 +79,9 @@ async fn main() -> anyhow::Result<()> {
         worlds,
     };
 
+    let game_elements = state.elements.clone();
+    let game_storage = state.organism_instance_storage.clone();
+    let game_model_lock = state.organism_model_storage_lock.clone();
     let app = api::router(state);
 
     // --- 5. 绑定端口 ---
@@ -70,7 +90,13 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(target: "main", "server started on {}:{}", config.server.host, config.server.port);
 
     // --- 6. 启动游戏循环与 API 服务 ---
-    let game_task = tokio::spawn(game::run(game_worlds));
+    let game_task = tokio::spawn(game::run(
+        game_worlds,
+        ai_runtime.clone(),
+        game_elements,
+        game_storage,
+        game_model_lock,
+    ));
 
     let server_result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -79,6 +105,7 @@ async fn main() -> anyhow::Result<()> {
     // 游戏循环目前没有自己的退出信号，API 服务停止后直接结束该任务。
     game_task.abort();
     let _ = game_task.await;
+    ai_runtime.shutdown().await;
 
     server_result?;
 

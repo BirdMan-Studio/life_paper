@@ -23,12 +23,13 @@ pub use organism_component::{
     create_default_component_registry,
 };
 pub use terrain::{
-    TerrainDefinition, TerrainId, TerrainRegistrationError, TerrainRegistry,
+    TerrainDefinition, TerrainId, TerrainRegistrationError, TerrainRegistry, TerrainVisual,
     create_default_terrain_registry,
 };
 pub use user::User;
 pub use world::{
-    MAX_LEVEL_ID_LENGTH, MAX_TOTAL_WORLDS, MAX_WORLDS_PER_USER, MapPosition, TerrainArea,
-    TerrainLayer, World, WorldDirectory, WorldDirectoryError, WorldGenerationError,
-    WorldGeneratorEditor, WorldInstance, WorldKind, WorldStatus, generate_basic_world,
+    GroundGenerationConfig, GroundProperties, GroundTerrainProfile, MAX_LEVEL_ID_LENGTH,
+    MAX_TOTAL_WORLDS, MAX_WORLDS_PER_USER, MapPosition, TerrainArea, TerrainLayer, World,
+    WorldDirectory, WorldDirectoryError, WorldGenerationError, WorldGeneratorEditor, WorldInstance,
+    WorldKind, WorldStatus, generate_basic_world,
 };

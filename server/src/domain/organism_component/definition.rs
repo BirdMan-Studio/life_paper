@@ -140,6 +140,8 @@ impl Default for ComponentUnlockRule {
 /// `function_code` 仅保存未来功能实现的稳定代码，不在注册阶段执行。
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ComponentDefinition {
+    #[serde(default)]
+    pub properties: super::ComponentProperties,
     pub model: super::ComponentModel,
     pub id: ComponentId,
     pub name: String,

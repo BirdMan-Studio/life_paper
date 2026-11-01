@@ -52,7 +52,7 @@ onBeforeUnmount(() => window.removeEventListener('life-paper:unauthorized', expi
   <ToastMessage :message="toastMessage" :tone="toastTone" @close="closeToast" />
   <LoginView v-if="!isReady" :loading="session.loading.value" @login="login" @register="register" @server-changed="serverChanged" />
   <AppShell v-else :route="route" :compact="compact" :profile="session.profile.value" :wallet="data.wallet.value" :label="currentLabel" @navigate="route = $event" @toggle="compact = !compact" @logout="logout">
-    <WorldView v-if="route === 'world'" :worlds="data.worlds.value" :active-world="data.activeWorld.value" :wallet="data.wallet.value" :models="data.models.value" :loading="data.loading.value" @select-world="data.selectWorld" @toggle-world="toggleWorld" @tutorial="tutorial" />
+    <WorldView v-if="route === 'world'" :worlds="data.worlds.value" :active-world="data.activeWorld.value" :ground="data.ground.value" :wallet="data.wallet.value" :models="data.models.value" :loading="data.loading.value" @select-world="data.selectWorld" @toggle-world="toggleWorld" @tutorial="tutorial" @notify="saveNotice" />
     <CreaturesView v-else-if="route === 'creatures'" :components="data.unlockedComponents.value" :locked="data.lockedComponents.value" :models="data.models.value" :loading="data.loading.value" :unlock-action="unlockComponent" />
     <ModelsView v-else-if="route === 'models'" :models="data.models.value" :components="data.unlockedComponents.value" :loading="data.loading.value" @open="openModel" @create="route = 'model-builder'" />
     <ModelBuilderView v-else-if="route === 'model-builder'" :components="data.unlockedComponents.value" @back="route = 'models'" @created="modelCreated" @notify="saveNotice" />

@@ -81,6 +81,10 @@ cargo run
 
 首次初始化使用 `safe_mode = false`。数据库迁移和运行账号创建完成后，建议切换为 `safe_mode = true`，再重启服务端。
 
+世界存档位于所加载的 `config.toml` 同级的 `data/worlds`，模型文件位于 `data/organism_models`。从仓库根目录或 `server` 目录启动都会找到 `server/config.toml` 并使用同一数据目录；也可用 `LIFE_PAPER_CONFIG` 指定配置文件路径。启动日志会显示配置和数据目录的绝对路径。重启后世界默认暂停，仍可在列表中查询、读取地层和生物，恢复后继续参与游戏循环。
+
+实例代码保存在 `data/organism_instances`，入口为 `main.py` 中的 `main(game)`，可在世界的生物列表中打开编辑，世界模拟时每 tick 自动运行。Python 调用器默认关闭，开启配置、接口与执行限制见 [生物 AI 文档](common/ai.md)。
+
 默认 API 地址为：
 
 ```text
@@ -105,10 +109,10 @@ Tauri 运行前必须先启动服务端，并保持服务端终端运行：
 
 ```powershell
 cd client
-npx tauri dev
+npm run desktop
 ```
 
-客户端登录页右下角可以修改服务器地址。浏览器开发模式和 Tauri 客户端使用同一套服务端 API。
+该命令等同于 `npx tauri dev --no-dev-server`：先构建前端，再由桌面窗口直接加载内置资源，不启动 Vite 的 1420 端口或 Tauri 的静态资源服务器。修改前端后需重新执行命令，或运行 `npm run build` 更新资源；此模式不提供 Vite 热更新。客户端登录页右下角可以修改服务器地址。后端 API 服务仍需运行。
 
 生产构建：
 

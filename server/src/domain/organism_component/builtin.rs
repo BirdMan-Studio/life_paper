@@ -92,6 +92,94 @@ pub fn create_default_component_registry() -> Result<ComponentRegistry, Componen
         model.appearance.stroke = stroke.into();
         registry.set_model(id, model)?;
     }
+    use super::ComponentProperties;
+    for (
+        id,
+        durability,
+        damage,
+        repair,
+        mass_mg,
+        energy,
+        non_gas,
+        gas,
+        reaction_min,
+        reaction_max,
+        sensors,
+    ) in [
+        (
+            "small_body_1",
+            100,
+            10,
+            10,
+            Some(40_000),
+            1_000,
+            2_000,
+            4_000,
+            -10,
+            2,
+            0,
+        ),
+        ("jet_organ_1", 50, 40, 10, Some(5_000), 0, 0, 0, 0, 0, 0),
+        (
+            "absorption_organ_1",
+            50,
+            40,
+            10,
+            Some(5_000),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ),
+        ("skin_1", 200, 100, 20, Some(2_000), 0, 0, 0, 0, 0, 0),
+        (
+            "photosensor_organ_1",
+            10,
+            40,
+            10,
+            Some(5_000),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ),
+        (
+            "reaction_structure_1",
+            10,
+            2,
+            1,
+            None,
+            0,
+            20_000,
+            0,
+            -50,
+            10,
+            0,
+        ),
+        ("sensor_group_1", 20, 2, 1, None, 0, 0, 0, 0, 0, 2),
+        ("gas_chamber_1", 10, 2, 1, None, 0, 0, 8_000, 0, 0, 0),
+    ] {
+        registry.set_properties(
+            id,
+            ComponentProperties {
+                api: Some(super::builtin_component_api(id)),
+                max_durability: durability,
+                damage_weight: damage,
+                repair_weight: repair,
+                mass_mg,
+                energy_capacity_mj: energy,
+                non_gas_capacity_mg: non_gas,
+                gas_capacity_ul: gas,
+                reaction_min_mj_per_tick: reaction_min,
+                reaction_max_mj_per_tick: reaction_max,
+                sensor_slots: sensors,
+            },
+        )?;
+    }
     Ok(registry)
 }
 

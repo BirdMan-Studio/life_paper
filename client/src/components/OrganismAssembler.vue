@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { Box, Hand, Link2, Move, MousePointer2, RotateCcw, Trash2, Unlink, ZoomIn, ZoomOut } from 'lucide-vue-next'
 import { useI18n } from '../i18n'
+import { capsulePoint as sharedCapsulePoint, externalPath as sharedExternalPath, interiorPosition, renderPart } from '../rendering/organism'
 
 const props = defineProps({ components: { type: Array, default: () => [] } })
 const { t } = useI18n()
@@ -44,6 +45,19 @@ function modelOf(node) { return definitionOf(node)?.model }
 function assemblyOf(node) { return modelOf(node)?.assembly }
 function appearanceOf(node) { return modelOf(node)?.appearance }
 function surfaceOffset(node) { return (appearanceOf(node)?.protrusion_px || 0) * DISPLAY_SCALE }
+function renderNode(node) {
+  const size = componentSize(node)
+  return { ...node, displayScale: DISPLAY_SCALE, category: categoryOf(node), model: modelOf(node), size: { width_px: size.width * DISPLAY_SCALE, length_px: size.length * DISPLAY_SCALE } }
+}
+function solidVisual(node) {
+  const size = componentSize(node)
+  const part = renderPart({ ...renderNode(node), size: { width_px: size.width, length_px: size.length }, x: 0, y: 0, rotationMdeg: 0 })
+  return { d: part.d, fill: part.fill, stroke: part.stroke, 'stroke-width': part.strokeWidth }
+}
+function solidViewBox(node) {
+  const size = componentSize(node)
+  return `${-size.length / 2} ${-size.width / 2} ${size.length} ${size.width}`
+}
 function nodeState(node) {
   return { selected: selectedId.value === node.id, hovered: hoveredId.value === node.id,
     dragging: draggingId.value === node.id, linking: linkingId.value === node.id,
@@ -82,7 +96,7 @@ function nodeStyle(node) {
     '--part-rotation': `${node.rotationMdeg / 1000}deg`,
     '--part-fill': appearanceOf(node)?.fill,
     '--part-stroke': appearanceOf(node)?.stroke,
-    '--part-stroke-width': `${(appearanceOf(node)?.stroke_width_px || 1) * DISPLAY_SCALE}px`,
+    '--part-stroke-width': `${(appearanceOf(node)?.stroke_width_px ?? 1) * DISPLAY_SCALE}px`,
     '--part-radius': modelOf(node)?.geometry === 'rectangle' ? '4px' : '999px',
   }
 }
@@ -214,8 +228,9 @@ function assignHost(part, candidateBody) {
     applySurfaceAnchor(part, candidateBody)
   } else {
     const siblings = nodes.value.filter((item) => item.id !== part.id && item.hostBody === candidateBody.id && categoryOf(item) === 'internal_organ').length
-    part.x = candidateBody.x - 24 + (siblings % 3) * 24
-    part.y = candidateBody.y + (Math.floor(siblings / 3) % 2) * 22 - 11
+    const point = interiorPosition({ x: candidateBody.x / DISPLAY_SCALE, y: candidateBody.y / DISPLAY_SCALE }, siblings)
+    part.x = point.x * DISPLAY_SCALE
+    part.y = point.y * DISPLAY_SCALE
   }
 }
 function connectionCountWithout(id, category, ignoredKey) {
@@ -265,27 +280,7 @@ function moveHost(node, body) {
   assignHost(node, body)
 }
 function capsulePoint(body, perimeterPpm) {
-  const point = capsuleLocalPoint(body, perimeterPpm)
-  const radians = body.rotationMdeg / 1000 * Math.PI / 180
-  return { x: body.x + point.x * Math.cos(radians) - point.y * Math.sin(radians), y: body.y + point.x * Math.sin(radians) + point.y * Math.cos(radians), angle: point.angle + body.rotationMdeg / 1000 }
-}
-function capsuleLocalPoint(body, perimeterPpm) {
-  const { width, height } = displaySize(body)
-  const radius = height / 2
-  const straight = width - height
-  const perimeter = 2 * straight + 2 * Math.PI * radius
-  let distance = (perimeterPpm / 1_000_000) * perimeter
-  if (distance <= straight) return { x: -straight / 2 + distance, y: -radius, angle: -90 }
-  distance -= straight
-  if (distance <= Math.PI * radius) {
-    const angle = -90 + (distance / (Math.PI * radius)) * 180
-    return { x: straight / 2 + Math.cos(angle * Math.PI / 180) * radius, y: Math.sin(angle * Math.PI / 180) * radius, angle }
-  }
-  distance -= Math.PI * radius
-  if (distance <= straight) return { x: straight / 2 - distance, y: radius, angle: 90 }
-  distance -= straight
-  const angle = 90 + (distance / (Math.PI * radius)) * 180
-  return { x: -straight / 2 + Math.cos(angle * Math.PI / 180) * radius, y: Math.sin(angle * Math.PI / 180) * radius, angle }
+  return sharedCapsulePoint(renderNode(body), perimeterPpm)
 }
 function applySurfaceAnchor(node, body) {
   if (node.anchorPpm == null) return
@@ -296,24 +291,7 @@ function applySurfaceAnchor(node, body) {
 }
 function externalPath(node, offset = 0) {
   const body = bodyFor(node)
-  if (!body) {
-    return `M ${node.x - componentSize(node).length * DISPLAY_SCALE / 2} ${node.y} h ${componentSize(node).length * DISPLAY_SCALE}`
-  }
-  const size = displaySize(body)
-  const perimeter = 2 * (size.width - size.height) + Math.PI * size.height
-  const skin = assemblyOf(node) === 'wrap'
-  const anchor = skin ? 0 : node.anchorPpm ?? 0
-  const center = skin ? body : capsulePoint(body, anchor)
-  const span = skin ? perimeter : componentSize(node).length * DISPLAY_SCALE
-  const steps = Math.max(8, Math.ceil(span / 2))
-  const points = Array.from({ length: steps + 1 }, (_, index) => {
-    const distance = skin ? index / steps * span : (index / steps - 0.5) * span
-    const ppm = ((anchor + distance / perimeter * 1_000_000) % 1_000_000 + 1_000_000) % 1_000_000
-    const point = capsulePoint(body, ppm)
-    const angle = point.angle * Math.PI / 180
-    return `${point.x + node.x - center.x + Math.cos(angle) * offset} ${point.y + node.y - center.y + Math.sin(angle) * offset}`
-  })
-  return `M ${points.join(' L ')}${skin ? ' Z' : ''}`
+  return sharedExternalPath(renderNode(node), body ? renderNode(body) : null, offset)
 }
 function snapToHost(node) {
   if (!node || categoryOf(node) === 'body') return
@@ -494,7 +472,7 @@ defineExpose({ buildPayload, addComponent, reset })
           </svg>
           <button v-for="node in solidNodes" :key="node.id" class="assembly-node component-state" :class="[categoryOf(node), nodeState(node)]" :style="nodeStyle(node)" :data-node-id="node.id" :aria-label="shortName(node)" @pointerenter="hoveredId = node.id" @pointerleave="hoveredId = ''" @pointerdown.stop="pointerDown($event, node)">
             <span class="anatomy-visual">
-              <span class="anatomy-shape"><span class="anatomy-detail"></span><span class="anatomy-detail-secondary"></span><span class="anatomy-detail-tertiary"></span></span>
+              <span class="anatomy-shape"><svg class="organism-solid" :viewBox="solidViewBox(node)"><path v-bind="solidVisual(node)" /></svg></span>
             </span>
           </button>
           <svg class="surface-layer">

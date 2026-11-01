@@ -21,6 +21,7 @@
   - [创建玩家世界](#创建玩家世界)
   - [暂停世界](#暂停世界)
   - [恢复世界](#恢复世界)
+  - [获取世界地层生成配置](#获取世界地层生成配置)
 - [服务器相关](#服务器相关)
   - [获取服务器信息](#获取服务器信息)
   - [获取服务器状态](#获取服务器状态)
@@ -206,6 +207,8 @@
 
 `name` 是世界的显示名称，可省略；省略时默认使用 `level_id`。名称最长 128 个字符。
 
+可选 `ai_full_visibility: true` 启用简单模式的 AI 世界查询权限；默认 `false`。此设置随世界保存，新手世界始终开放完整查询。具体权限见 [AI 接口说明](ai.md)。
+
 成功响应：`200 OK`，返回新创建的世界摘要。
 
 当前限制：
@@ -232,6 +235,52 @@
 只能恢复当前用户拥有的世界。恢复成功后返回状态为 `active` 的世界摘要。
 
 如果世界之前已被卸载，恢复时会从磁盘快照重新加载世界运行时。
+
+### 获取世界地层生成配置
+
+`GET /worlds/{world_id}/ground`（需要认证）
+
+返回客户端生成地层所需的确定性生成器参数，以及服务器分发的地形规则和视觉样式。客户端不得自行修改这些参数；世界当前只提供读取接口。
+
+暂停或服务重启后尚未加载到内存的世界也可读取，服务端使用同一世界目录从存档读取配置，不会因此启动世界循环或创建替代世界。
+
+响应示例：
+
+```json
+{
+  "data": {
+      "generator": {
+      "seed": 12345,
+      "noise_scale_px": 384,
+      "variation_percent": 100,
+      "profile": {
+        "cliff": "cliff",
+        "valley": "valley",
+        "swamp": "swamp",
+        "pond": "pond",
+        "grassland": "grassland",
+        "wetland": "wetland",
+        "wall": "wall"
+      },
+      "area": null
+    },
+    "perlin_permutations": [[...256 个字节...], [...256 个字节...], [...256 个字节...], [...256 个字节...]],
+    "default_terrain": "wasteland",
+    "terrain_layers": [],
+    "terrains": [
+      {
+        "id": "grassland",
+        "name": "草地",
+        "slows_movement": false,
+        "blocks_movement": false,
+        "generates_oxygen": true,
+        "generated_matter_recipe": "grass_matter",
+        "visual": { "color": "#6fa85b", "pattern": "grass" }
+      }
+    ]
+  }
+}
+```
 
 ## 服务器相关
 
@@ -462,6 +511,123 @@
 ## 生物实例相关
 
 ### 生成生物实例
+
+`POST /api/v1/worlds/{world_id}/organisms`，需要 Bearer 登录凭证。
+
+```json
+{ "model_id": "模型 UUID" }
+```
+
+成功返回 `201 Created`，响应为 `{ "data": OrganismInstance }`。只能向自己的世界放置自己的模型。世界不存在返回 404，无世界权限返回 403，模型不存在或不属于当前用户返回 404。暂不接受坐标、方向、耐久或容器内容等客户端覆盖参数。
+
+实例包含：
+
+- `id`：独立实例 UUID；重复创建同一模型会产生不同实例。
+- `model_id`、`owner_user_id`、`name`：来源模型和归属信息。
+- `position: { "x": 0, "y": 0 }`：根身体中心的世界坐标，单位 px。
+- `rotation_mdeg: 0`：实例方向，单位千分之一度，顺时针为正。
+- `composition`：模型结构的独立快照，保留组件、宿主、连接、尺寸、局部方向；根身体位置归零。
+- `component_states`：以模型内组件 UUID 为键的运行状态，组件 ID 在各实例内独立使用。
+
+每个组件状态包含 `properties`（创建时的服务端属性快照）、`durability`（初始为最大耐久）、`energy_mj`（实例创建时为该组件的能量容量，之后由游戏刻消耗）、`container`：
+
+```json
+{
+  "non_gas_capacity_mg": 2000,
+  "gas_capacity_ul": 4000,
+  "non_gas_contents_mg": {},
+  "gas_contents_ul": {}
+}
+```
+
+非气体以毫克计，气体以微升计，内含物质按元素注册 ID 保存；新实例容器为空。小型躯体初始耐久 100，容量 2g / 4mL；反应结构增加自身 20g 容器，气室结构提供自身 8mL 容器。`properties` 还包含最大耐久、损坏/修复权重、质量、储能上限、容量、反应速率上下限和传感器槽位。设计中未指定的质量为 `null`。组件目录接口也下发这些可配置属性。
+
+实例随世界存档保存；创建立即写入存档，服务重启后仍可恢复。暂停世界也允许创建和查询实例，不会自动恢复世界。实例保存模型和属性快照，之后删除源模型或调整组件配置不改变已有实例。此接口暂不扣除资源，不执行伤害、反应或移动循环。
+
+### 获取世界内自己的生物实例
+
+`GET /api/v1/worlds/{world_id}/organisms`，需要登录且拥有该世界。
+
+返回 `200 OK`，响应为 `{ "data": [OrganismInstance] }`。客户端进入世界时读取列表，添加成功后使用服务端返回的实例渲染。
+
+### 实例 AI 代码
+
+创建实例时复制模型目录中的全部文件及子目录，保存至配置文件同级的 `data/organism_instances/{实例UUID}/`。`composition.id` 和 `composition.program_id` 均改为实例 UUID，`model_id` 保留来源模型 UUID。复制为独立文件，修改或删除模型、修改其他实例不会影响已生成实例。
+
+入口固定为根目录 `main.py`；源模型缺少入口时补充含 `def main(game)` 的示例入口。复制失败或实例存档失败时不创建实例，回滚新代码目录。单文件最大 10 MiB，复制总量最多 50 MiB、1024 个目录项，不接受符号链接或 Windows 重解析点。代码目录与世界存档均需备份。
+
+以下接口需要 Bearer 登录凭证，并验证世界、实例归属。路径通过 `path` 指定，必须是目录内的相对路径。
+
+| 方法 | 路径 | 内容 |
+| --- | --- | --- |
+| GET | `/api/v1/worlds/{world_id}/organisms/{organism_id}/folder?path=` | 获取目录，返回 `{ "data": [{ "name", "path", "kind", "size" }] }` |
+| GET | `/api/v1/worlds/{world_id}/organisms/{organism_id}/files?path=main.py` | 读取文件原文 |
+| PUT | 同上 | 原始文件内容请求体，保存成功返回 204，最大 10 MiB |
+| POST | `/api/v1/worlds/{world_id}/organisms/{organism_id}/folders` | `{ "path": "lib" }` 创建目录，返回 204 |
+| PATCH | `/api/v1/worlds/{world_id}/organisms/{organism_id}/entries` | `{ "path": "brain.py", "name": "helpers.py" }` 重命名，返回 204 |
+| DELETE | `/api/v1/worlds/{world_id}/organisms/{organism_id}/entries?path=brain.py` | 删除文件或目录，返回 204 |
+
+实例的根目录 `main.py` 可编辑、覆盖，不能删除或重命名。暂停世界也可编辑，重启后从磁盘读取已保存的修改。旧存档中的实例首次访问代码时创建独立空白 `main.py`，不引用或复制当前模型代码，以免将模型之后的修改意外套用到旧实例。
+
+客户端从世界右侧的生物列表进入实例 AI 编辑器，默认打开 `main.py`，编辑后可保存代码。世界模拟时每 tick 自动调用 `main(game)`，日志和错误从世界生物列表的日志入口查看。代码可读取自身、查询世界，并使用实例独立的 `game.memory` 保存记忆。
+
+### 查询 AI 调用器及实例状态
+
+`GET /api/v1/worlds/{world_id}/organisms/{organism_id}/ai`，需登录并拥有世界与实例。
+
+返回 `{ "data": { "enabled": false, "entry_file": "main.py", "entry_function": "main(game)", "timeout_ms": 2000, "max_queries": 256, "workers": 2, "cache_entries": 8, "state": { "calls": 0, "memory": {}, "pending_commands": [], "last_run": null, "history": [] } } }`。`history` 按时间顺序保存最近的运行报告，客户端可轮询该接口追加显示新日志。
+
+### 自动执行与运行报告
+
+世界模拟时由服务端每 tick 自动执行 Python `main(game)`，暂停时停止执行。查询 AI 状态可获取以下运行报告：
+
+```json
+{
+  "data": {
+    "calls": 1,
+    "memory": { "calls": 1 },
+    "pending_commands": [],
+    "last_run": {
+      "ok": true,
+      "logs": "organism wall 1\n",
+      "error": null,
+      "duration_ms": 8,
+      "commands": [],
+      "metrics": {
+        "code_version": "SHA-256内容版本",
+        "snapshot_cache_hit": true,
+        "code_cache_hit": true,
+        "worker_reused": true,
+        "worker_pid": 12345,
+        "snapshot_us": 1500,
+        "startup_us": 0,
+        "load_us": 900,
+        "execution_us": 20,
+        "query_us": 0,
+        "roundtrip_us": 6500,
+        "total_us": 8000
+      }
+    }
+  }
+}
+```
+
+脚本报错、超时或查询超限时，`last_run.ok` 为 false，`error` 为诊断，保留运行前的 memory。每次提交的调用增加 calls 并随世界存档保存。
+
+Python SDK、可见范围、配置与运行限制详见 [AI 接口说明](ai.md)。
+
+调用器使用常驻 Python 进程池、按内容版本缓存的代码快照及编译缓存。每次调用重新创建用户模块，持久状态通过 `memory` 保存。`metrics` 耗时单位为微秒，阶段存在包含关系，不能直接相加；旧存档没有指标时按默认值读取。批量地格接口为 `game.world.get_tiles(points)`，缓存命中不消耗查询额度，批量未缓存坐标按地格数消耗额度。
+
+`game.me.components[component_UUID]` 可按组件能力调用 `jet(material, rate)`、`absorb_air(rate)` 或 `absorb_matter(rate)`，组件 UUID 沿用模型。Rust 校验参数后原样记录请求速率，成功完成 AI 调用后保存到 `pending_commands` 和本次 `last_run.commands`；同一组件最后一条输出覆盖前面的输出，包括速率为零的控制。连续调用 `jet("water", 31)`、`jet("water", 0)` 最终只保存速率为 0 的一条记录。一次喷射指令示例：
+
+```json
+{
+  "component_id": "00000000-0000-0000-0000-000000000001",
+  "action": { "method": "jet", "material": "water", "rate_mg_per_tick": 31 }
+}
+```
+
+吸收指令的 `action.method` 为 `absorb_air` 或 `absorb_matter`，只有 `rate_mg_per_tick` 参数，允许浮点速率。成功且无输出时清空待执行指令；执行失败或保存失败时保留原有待执行指令，失败报告的 `commands` 为空。当前仅保存控制输出，精细度取整、耐久及资源检查留给游戏循环，尚未推进喷射、吸收及物理模拟；`get_vision` 预留并明确报未实现。组件请求和世界查询共享 `max_queries` 预算。
 
 ### 杀死生物实例
 

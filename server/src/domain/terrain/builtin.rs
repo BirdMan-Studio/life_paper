@@ -3,7 +3,17 @@
 //! 地基的地图生成、移动影响和物质生成逻辑不在这里实现；这里只登记稳定 ID
 //! 与后续系统读取的规则元数据。
 
-use super::{TerrainRegistrationError, TerrainRegistry};
+use super::{TerrainRegistrationError, TerrainRegistry, TerrainVisual};
+
+fn visual(registry: &mut TerrainRegistry, id: &str, color: &str, pattern: &str) {
+    registry.set_visual(
+        id,
+        TerrainVisual {
+            color: color.to_owned(),
+            pattern: pattern.to_owned(),
+        },
+    );
+}
 
 pub fn create_default_terrain_registry() -> Result<TerrainRegistry, TerrainRegistrationError> {
     let mut registry = TerrainRegistry::new();
@@ -18,8 +28,24 @@ pub fn create_default_terrain_registry() -> Result<TerrainRegistry, TerrainRegis
         Some("grass_matter"),
     )?;
     registry.register("shallow_water", "潜水", true, false, true, None)?;
+    registry.register("pond", "水潭", true, false, true, None)?;
     registry.register("deep_water", "深水", true, false, false, None)?;
     registry.register("wall", "墙", false, true, false, None)?;
+    registry.register("cliff", "悬崖", false, true, false, None)?;
+    registry.register("valley", "谷地", true, false, true, None)?;
+    registry.register("swamp", "沼泽", true, false, true, None)?;
+    registry.register("wetland", "湿地", true, false, true, None)?;
+
+    visual(&mut registry, "wasteland", "#4c5560", "dust");
+    visual(&mut registry, "grassland", "#6fa85b", "grass");
+    visual(&mut registry, "shallow_water", "#3f91a6", "ripples");
+    visual(&mut registry, "pond", "#4e9fb0", "ripples");
+    visual(&mut registry, "deep_water", "#24516d", "waves");
+    visual(&mut registry, "wall", "#7b8791", "blocks");
+    visual(&mut registry, "cliff", "#6f5d52", "rock");
+    visual(&mut registry, "valley", "#769b7c", "mist");
+    visual(&mut registry, "swamp", "#627f62", "mud");
+    visual(&mut registry, "wetland", "#7fa866", "reeds");
 
     Ok(registry)
 }
@@ -31,7 +57,7 @@ mod tests {
     #[test]
     fn registers_default_terrain_rules() {
         let registry = create_default_terrain_registry().unwrap();
-        assert_eq!(registry.len(), 5);
+        assert_eq!(registry.len(), 10);
 
         let wasteland = registry.get("wasteland").unwrap();
         assert!(!wasteland.slows_movement);

@@ -11,7 +11,8 @@
 .anatomy-visual { position:absolute; inset:0; transform:rotate(var(--part-rotation)); }
 .anatomy-shape { position:absolute; inset:0; display:block; border:1px solid #6b8390; }
 .assembly-node.body { z-index:2; }
-.builder-page .assembly-node .anatomy-shape { border-radius:var(--part-radius); border-color:var(--part-stroke); border-width:var(--part-stroke-width); background:var(--part-fill); box-shadow:none; }
+.builder-page .assembly-node .anatomy-shape { border-radius:var(--part-radius); border:0; background:none; box-shadow:none; }
+.organism-solid { display:block; width:100%; height:100%; overflow:visible; }
 .assembly-node.internal_organ { z-index:3; }
 .assembly-node.selected,.assembly-node.linking,.assembly-node.compatible { outline:0; box-shadow:none; animation:none; }
 .component-state { --component-frame-opacity:0; --component-info-opacity:0; --component-frame-color:#90a9ae; }
