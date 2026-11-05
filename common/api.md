@@ -524,8 +524,9 @@
 
 - `id`：独立实例 UUID；重复创建同一模型会产生不同实例。
 - `model_id`、`owner_user_id`、`name`：来源模型和归属信息。
-- `position: { "x": 0, "y": 0 }`：根身体中心的世界坐标，单位 px。
+- `position: { "x": 0, "y": 0 }`：根身体中心的世界坐标，单位 px；出生时若与阻挡地形重叠，服务器会有界搜索附近合法位置。
 - `rotation_mdeg: 0`：实例方向，单位千分之一度，顺时针为正。
+- `motion`：连续位置、弧度方向、质心线速度和角速度，字段与单位见 [AI 文档](ai.md)；旧实例尚未推进时可为 `null`。
 - `composition`：模型结构的独立快照，保留组件、宿主、连接、尺寸、局部方向；根身体位置归零。
 - `component_states`：以模型内组件 UUID 为键的运行状态，组件 ID 在各实例内独立使用。
 
@@ -534,15 +535,17 @@
 ```json
 {
   "non_gas_capacity_mg": 2000,
-  "gas_capacity_ul": 4000,
+  "gas_capacity_ul": 20000,
   "non_gas_contents_mg": {},
   "gas_contents_ul": {}
 }
 ```
 
-非气体以毫克计，气体以微升计，内含物质按元素注册 ID 保存；新实例容器为空。小型躯体初始耐久 100，容量 2g / 4mL；反应结构增加自身 20g 容器，气室结构提供自身 8mL 容器。`properties` 还包含最大耐久、损坏/修复权重、质量、储能上限、容量、反应速率上下限和传感器槽位。设计中未指定的质量为 `null`。组件目录接口也下发这些可配置属性。
+非气体以毫克计，气体以微升计，内含物质按元素注册 ID 保存；新实例容器为空。小型躯体初始耐久 100，容量 2g / 20mL；反应结构增加自身 20g 容器，气室结构提供自身 40mL 容器。已有实例保留属性快照，不自动扩容。`properties` 还包含最大耐久、损坏/修复权重、质量、储能上限、容量、反应速率上下限和传感器槽位。设计中未指定的质量为 `null`。组件目录接口也下发这些可配置属性。
 
-实例随世界存档保存；创建立即写入存档，服务重启后仍可恢复。暂停世界也允许创建和查询实例，不会自动恢复世界。实例保存模型和属性快照，之后删除源模型或调整组件配置不改变已有实例。此接口暂不扣除资源，不执行伤害、反应或移动循环。
+`non_gas_contents_mg` 当前支持浮点mg，以保存范围吸收的混合物比例和微量余数；旧存档的整数值兼容。世界新增可选 `matter` 存档字段，保存逻辑tick及圆形吸收/补入记录；旧世界缺少时以满默认营养初始化。AI `get_tile` 返回 `matter_mg` 映射，各项为该格当前剩余质量。草地恢复、衰减和记录字段见[世界物质设计](matter.md)。
+
+实例随世界存档保存；创建立即写入存档，服务重启后仍可恢复。暂停世界也允许创建和查询实例，不会自动恢复世界。实例保存模型和属性快照，之后删除源模型或调整组件配置不改变已有实例。创建接口暂不扣除资源，不执行伤害或反应。活动世界的移动由游戏 tick 统一推进，支持喷射推力、角速度、惯性和地形约束。
 
 ### 获取世界内自己的生物实例
 
@@ -618,16 +621,31 @@ Python SDK、可见范围、配置与运行限制详见 [AI 接口说明](ai.md)
 
 调用器使用常驻 Python 进程池、按内容版本缓存的代码快照及编译缓存。每次调用重新创建用户模块，持久状态通过 `memory` 保存。`metrics` 耗时单位为微秒，阶段存在包含关系，不能直接相加；旧存档没有指标时按默认值读取。批量地格接口为 `game.world.get_tiles(points)`，缓存命中不消耗查询额度，批量未缓存坐标按地格数消耗额度。
 
-`game.me.components[component_UUID]` 可按组件能力调用 `jet(material, rate)`、`absorb_air(rate)` 或 `absorb_matter(rate)`，组件 UUID 沿用模型。Rust 校验参数后原样记录请求速率，成功完成 AI 调用后保存到 `pending_commands` 和本次 `last_run.commands`；同一组件最后一条输出覆盖前面的输出，包括速率为零的控制。连续调用 `jet("water", 31)`、`jet("water", 0)` 最终只保存速率为 0 的一条记录。一次喷射指令示例：
+`game.me.components[component_UUID]` 可按组件能力调用 `jet(material, rate, angle=0)`、`absorb_air(rate)` 或 `absorb_matter(rate)`，组件 UUID 沿用模型。Rust 校验参数后原样记录请求速率和偏转角，成功完成 AI 调用后保存到 `pending_commands` 和本次 `last_run.commands`；同一组件最后一条输出覆盖前面的输出，包括速率为零的控制。连续调用 `jet("water", 31)`、`jet("water", 0)` 最终只保存速率为 0 的一条记录。一次喷射指令示例：
 
 ```json
 {
   "component_id": "00000000-0000-0000-0000-000000000001",
-  "action": { "method": "jet", "material": "water", "rate_mg_per_tick": 31 }
+  "action": { "method": "jet", "material": "water", "rate_mg_per_tick": 31, "angle_deg": 3 }
 }
 ```
 
-吸收指令的 `action.method` 为 `absorb_air` 或 `absorb_matter`，只有 `rate_mg_per_tick` 参数，允许浮点速率。成功且无输出时清空待执行指令；执行失败或保存失败时保留原有待执行指令，失败报告的 `commands` 为空。当前仅保存控制输出，精细度取整、耐久及资源检查留给游戏循环，尚未推进喷射、吸收及物理模拟；`get_vision` 预留并明确报未实现。组件请求和世界查询共享 `max_queries` 预算。
+吸气指令的 `action.method` 为 `absorb_air`，使用 `rate_ml_per_tick`，范围 0～5 mL/tick，精细度10，tick 执行时向下取整为0.5 mL一档；`absorb_matter` 仍使用 `rate_mg_per_tick`，0～50 mg/tick、5 mg一档。吸气已接入地层许可、身体气体容量、耐久和能耗限制，空气按21%氧气、79%氮气入库，深水及阻挡地层禁用且不扣世界库存。非气体吸收以器官为圆心、半径5 px，从世界范围库存按平均组成吸收并扣除余量，实际量受容器、体积、耐久和能量约束。详见 [AI说明](ai.md)。成功且无输出时清空待执行指令；执行失败或保存失败时保留原有待执行指令，失败报告的 `commands` 为空。喷射执行时按档位、耐久、储能和库存限制扣料，产生推力及转矩。`get_vision` 预留并明确报未实现。组件请求和世界查询共享 `max_queries` 预算。完整动力学规则见 [设计文档](dynamics.md)。
+
+### 世界物质交换
+
+以下接口需要登录且拥有世界，结果包装为 `{ "data": ... }`。
+
+- `GET /api/v1/worlds/{world_id}/matter?x=0&y=0&radius_px=5[&since=123]`：首次返回附近活动记录，携带since时只返回新增/有效期更新的活动记录。响应含 `tick`、`cursor`、`reset`、查询区域、恢复/流失参数和 `records`。半径0～64px；since不能超过当前历史条数。
+- `GET /api/v1/worlds/{world_id}/matter/history?after=0&limit=100`：分页读取历史，含气体和过时记录。响应含 `tick`、`cursor`、`has_more`、`records`。limit为1～200。
+
+记录使用世界tick，带生物/器官来源、交换实际量、圆形范围、过时tick。`sequence` 是稳定的世界内记录序号，`updated_at_sequence` 是最后一次修改有效期时的历史游标。客户端增量按sequence覆盖，按tick过时；更换查询范围须重新取不带since的快照。同期有效期变化也会随增量返回，不能只按新记录序号追加。完整语义与存储限制见[世界物质设计](matter.md)。
+
+### Python API 文档
+
+`GET /api/v1/python-api` 无需登录，返回 `{ "data": { "version": 2, "title": "Python API", "sections": [...], "components": [...], "substances": [...] } }`。接口条目包含签名、可用状态、参数、返回值、执行规则和示例；物质与组件目录来自当前服务器注册表。客户端侧栏「API 文档」加载此接口，提供搜索、分类、复制示例和刷新。
+
+喷射使用 `part.jet(material, rate, angle=0)`，`angle_deg` 范围 -5°～5°，精细度10，每档1°，取最近整数度，半档远离零，正值顺时针。缺少角度的旧调用与存档默认0°。执行时从连接身体扣料，质量/体积限制同时生效，按实际扣除质量产生推力；空仓无推力。固液排入喷口所在格，气体散入环境。
 
 ### 杀死生物实例
 

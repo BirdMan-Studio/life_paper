@@ -6,6 +6,7 @@ import WorldView from './views/WorldView.vue'
 import CreaturesView from './views/CreaturesView.vue'
 import ModelsView from './views/ModelsView.vue'
 import SettingsView from './views/SettingsView.vue'
+import ApiDocsView from './views/ApiDocsView.vue'
 import ModelDetailView from './views/ModelDetailView.vue'
 import ModelBuilderView from './views/ModelBuilderView.vue'
 import ToastMessage from './components/ToastMessage.vue'
@@ -57,6 +58,7 @@ onBeforeUnmount(() => window.removeEventListener('life-paper:unauthorized', expi
     <ModelsView v-else-if="route === 'models'" :models="data.models.value" :components="data.unlockedComponents.value" :loading="data.loading.value" @open="openModel" @create="route = 'model-builder'" />
     <ModelBuilderView v-else-if="route === 'model-builder'" :components="data.unlockedComponents.value" @back="route = 'models'" @created="modelCreated" @notify="saveNotice" />
     <ModelDetailView v-else-if="route === 'model-detail' && selectedModel" :model="selectedModel" @back="route = 'models'" @deleted="modelDeleted" />
+    <ApiDocsView v-else-if="route === 'docs'" />
     <SettingsView v-else :profile="session.profile.value" @saved="saveNotice" @delete-account="deleteAccount" />
   </AppShell>
 </template>

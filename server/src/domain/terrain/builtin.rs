@@ -63,6 +63,7 @@ mod tests {
         assert!(!wasteland.slows_movement);
         assert!(!wasteland.blocks_movement);
         assert!(!wasteland.generates_oxygen);
+        assert!(wasteland.allows_air_absorption);
         assert_eq!(wasteland.generated_matter_recipe, None);
 
         let grassland = registry.get("grassland").unwrap();
@@ -78,8 +79,10 @@ mod tests {
         let deep_water = registry.get("deep_water").unwrap();
         assert!(deep_water.slows_movement);
         assert!(!deep_water.generates_oxygen);
+        assert!(!deep_water.allows_air_absorption);
 
         let wall = registry.get("wall").unwrap();
         assert!(wall.blocks_movement);
+        assert!(!wall.allows_air_absorption);
     }
 }

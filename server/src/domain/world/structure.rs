@@ -184,6 +184,8 @@ pub struct TerrainLayer {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct World {
     #[serde(default)]
+    pub matter: super::WorldMatter,
+    #[serde(default)]
     pub ai_full_visibility: bool,
     #[serde(default)]
     pub organisms:
@@ -197,6 +199,7 @@ pub struct World {
 impl World {
     pub(crate) fn new(default_terrain: TerrainId, terrain_layers: Vec<TerrainLayer>) -> Self {
         Self {
+            matter: Default::default(),
             ai_full_visibility: false,
             default_terrain,
             organisms: Default::default(),

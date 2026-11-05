@@ -85,6 +85,13 @@ pub struct WorldDirectory {
     state: Mutex<DirectoryState>,
 }
 
+pub struct AiCommit {
+    pub organism_id: Uuid,
+    pub expected_calls: u64,
+    pub report: crate::domain::organism::AiRunReport,
+    pub memory: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
 impl WorldDirectory {
     pub fn new(terrains: Arc<TerrainRegistry>) -> Self {
         Self {
@@ -290,6 +297,10 @@ impl WorldDirectory {
                         }
                     }
                 }
+                // Invalidate in-flight work from before a pause/resume transition.
+                if let Some(current) = runtime.as_ref() {
+                    *runtime = Some(Arc::new(current.as_ref().clone()));
+                }
                 world.resume();
             }
             WorldStatus::Paused => {
@@ -366,7 +377,7 @@ impl WorldDirectory {
         Ok(())
     }
 
-    /// Commit AI memory only if this invocation still owns the current revision.
+    #[cfg(test)]
     pub fn commit_ai(
         &self,
         world_id: Uuid,
@@ -382,93 +393,91 @@ impl WorldDirectory {
         if world.owner_user_id != owner_user_id {
             return Err(WorldDirectoryError::Forbidden);
         }
+        let Some(snapshot) = world.world() else {
+            return Ok(false);
+        };
+        self.commit_tick(
+            world_id,
+            &snapshot,
+            vec![AiCommit {
+                organism_id,
+                expected_calls,
+                report,
+                memory,
+            }],
+        )
+    }
+
+    /// Atomically publish one completed simulation tick, including AI and physics.
+    pub fn commit_tick(
+        &self,
+        world_id: Uuid,
+        snapshot: &Arc<World>,
+        results: Vec<AiCommit>,
+    ) -> Result<bool, WorldDirectoryError> {
+        let world = self
+            .get(world_id)
+            .ok_or(WorldDirectoryError::WorldNotFound)?;
         let mut runtime = world.world.lock().expect("world runtime lock poisoned");
         if world.status() != WorldStatus::Active {
             return Ok(false);
         }
-        let mut updated = match runtime.as_ref() {
-            Some(value) => value.as_ref().clone(),
-            None => self.load_snapshot(world_id)?,
-        };
-        let Some(organism) = updated.organisms.get_mut(&organism_id) else {
+        let Some(current) = runtime
+            .as_ref()
+            .filter(|current| Arc::ptr_eq(current, snapshot))
+        else {
             return Ok(false);
         };
-        if organism.owner_user_id != owner_user_id || organism.ai.calls != expected_calls {
-            return Ok(false);
-        }
-        let commands = if report.ok {
-            organism.ai.pending_commands = report.commands.clone();
-            report.commands.clone()
-        } else {
-            // A failed AI update keeps the previous control signal active for this tick.
-            organism.ai.pending_commands.clone()
-        };
-        let had_energy = organism
-            .component_states
-            .values()
-            .any(|state| state.energy_mj > 0);
-        let mut cost = 0u64;
-        for (id, state) in &organism.component_states {
-            if state.durability == 0 { continue; }
-            let Some(part) = organism.composition.components.get(id) else { continue; };
-            let builtin = crate::domain::organism_component::builtin_component_api(part.component.as_str());
-            let api = state.properties.api.as_ref().unwrap_or(&builtin);
-            // Rate-controlled organs already carry their base cost; passive organs
-            // expose it separately. Fall back for snapshots predating passive costs.
-            let base = api.base_energy_mj.or(builtin.base_energy_mj).unwrap_or(0)
-                + api.jet.as_ref().map_or(0, |value| value.base_energy_mj)
-                + api.absorption.as_ref().map_or(0, |value| value.base_energy_mj);
-            cost = cost.saturating_add(u64::from(base));
-            if let Some(command) = commands.iter().rev().find(|command| command.component_id == *id) {
-                use crate::domain::organism_component::ComponentAction;
-                let (spec, rate) = match &command.action {
-                    ComponentAction::Jet { rate_mg_per_tick, .. } => (api.jet.as_ref(), *rate_mg_per_tick),
-                    ComponentAction::AbsorbAir { rate_mg_per_tick } | ComponentAction::AbsorbMatter { rate_mg_per_tick } => (api.absorption.as_ref(), *rate_mg_per_tick),
-                };
-                if let Some(spec) = spec {
-                    cost = cost.saturating_add(spec.energy_cost(rate) - u64::from(spec.base_energy_mj));
+        let mut updated = current.as_ref().clone();
+        let mut seen = std::collections::HashSet::new();
+        for result in results {
+            let Some(organism) = updated.organisms.get_mut(&result.organism_id) else {
+                return Ok(false);
+            };
+            if organism.ai.calls != result.expected_calls || !seen.insert(result.organism_id) {
+                return Ok(false);
+            }
+            let report = result.report;
+            if report.ok {
+                organism.ai.pending_commands = report.commands.clone();
+                if let Some(memory) = result.memory {
+                    organism.ai.memory = memory;
                 }
             }
-        }
-        if let Some(root) = organism.composition.root_body {
-            if let Some(state) = organism.component_states.get_mut(&root) {
-                let spent = state.energy_mj.min(cost);
-                state.energy_mj -= spent;
-                cost -= spent;
+            organism.ai.calls = organism.ai.calls.saturating_add(1);
+            organism.ai.history.push(report.clone());
+            if organism.ai.history.len() > 256 {
+                let trim = organism.ai.history.len() - 256;
+                organism.ai.history.drain(..trim);
             }
+            organism.ai.last_run = Some(report);
         }
-        for state in organism.component_states.values_mut() {
-            let spent = state.energy_mj.min(cost);
-            state.energy_mj -= spent;
-            cost -= spent;
-            if cost == 0 { break; }
+        let mut matter = std::mem::take(&mut updated.matter);
+        matter.advance_tick();
+        for organism in updated.organisms.values_mut() {
+            crate::game::dynamics::advance_with_matter(
+                organism,
+                snapshot,
+                &self.terrains,
+                &mut matter,
+            );
         }
-        // Zero energy means the instance has no behavior left to execute.
-        if had_energy
-            && organism
-                .component_states
-                .values()
-                .all(|state| state.energy_mj == 0)
-        {
-            organism.ai.pending_commands.clear();
-        }
-        if report.ok {
-            if let Some(memory) = memory {
-                organism.ai.memory = memory;
-            }
-        }
-        organism.ai.calls = organism.ai.calls.saturating_add(1);
-        organism.ai.history.push(report.clone());
-        if organism.ai.history.len() > 256 {
-            let trim = organism.ai.history.len() - 256;
-            organism.ai.history.drain(..trim);
-        }
-        organism.ai.last_run = Some(report);
+        updated.matter = matter;
         self.save_snapshot(&world, &updated)?;
         if runtime.is_some() {
             *runtime = Some(Arc::new(updated));
         }
         Ok(true)
+    }
+
+    pub fn place_organism(
+        &self,
+        world_id: Uuid,
+        organism: &mut crate::domain::organism::OrganismInstance,
+    ) -> Result<(), WorldDirectoryError> {
+        let world = self.read_world(world_id, organism.owner_user_id)?;
+        crate::game::dynamics::place(organism, &world, &self.terrains);
+        Ok(())
     }
 
     pub fn remove_for_user(&self, user_id: i64) {
@@ -688,24 +697,47 @@ mod tests {
     #[test]
     fn ai_without_commands_consumes_energy_on_success_and_failure() {
         let directory = WorldDirectory::new(Arc::new(create_default_terrain_registry().unwrap()));
-        let world = directory.create_player_world(7, "energy", "energy").unwrap();
+        let world = directory
+            .create_player_world(7, "energy", "energy")
+            .unwrap();
         let registry = crate::domain::create_default_component_registry().unwrap();
-        let mut model = crate::domain::BiologicalOrganism::new(crate::domain::OrganismProgramId::new());
+        let mut model =
+            crate::domain::BiologicalOrganism::new(crate::domain::OrganismProgramId::new());
         let root = model.add_component("small_body_1", &registry).unwrap();
-        for name in ["jet_organ_1", "absorption_organ_1", "skin_1", "photosensor_organ_1"] {
+        for name in [
+            "jet_organ_1",
+            "absorption_organ_1",
+            "skin_1",
+            "photosensor_organ_1",
+        ] {
             let part = model.add_component(name, &registry).unwrap();
             model.connect(root, part, &registry).unwrap();
         }
-        let mut organism = crate::domain::organism::OrganismInstance::from_model(model.id, 7, "energy".into(), model, &registry).unwrap();
+        let mut organism = crate::domain::organism::OrganismInstance::from_model(
+            model.id,
+            7,
+            "energy".into(),
+            model,
+            &registry,
+        )
+        .unwrap();
         organism.component_states.get_mut(&root).unwrap().energy_mj = 24;
         let id = organism.id;
         directory.add_organism(world.id, organism).unwrap();
         for (calls, ok) in [(0, true), (1, false)] {
             let report = crate::domain::organism::AiRunReport {
-                ok, logs: "1\n".into(), error: (!ok).then(|| "test error".into()),
-                duration_ms: 0, commands: vec![], metrics: Default::default(),
+                ok,
+                logs: "1\n".into(),
+                error: (!ok).then(|| "test error".into()),
+                duration_ms: 0,
+                commands: vec![],
+                metrics: Default::default(),
             };
-            assert!(directory.commit_ai(world.id, id, 7, calls, report.clone(), None).unwrap());
+            assert!(
+                directory
+                    .commit_ai(world.id, id, 7, calls, report.clone(), None)
+                    .unwrap()
+            );
             let current = directory.read_world(world.id, 7).unwrap();
             let instance = &current.organisms[&id];
             assert_eq!(instance.component_states[&root].energy_mj, 12 * (1 - calls));
@@ -714,16 +746,111 @@ mod tests {
         }
         world.pause();
         let report = crate::domain::organism::AiRunReport {
-            ok: true, logs: String::new(), error: None, duration_ms: 0,
-            commands: vec![], metrics: Default::default(),
+            ok: true,
+            logs: String::new(),
+            error: None,
+            duration_ms: 0,
+            commands: vec![],
+            metrics: Default::default(),
         };
-        assert!(!directory.commit_ai(world.id, id, 7, 2, report, None).unwrap());
-        assert_eq!(directory.read_world(world.id, 7).unwrap().organisms[&id].ai.calls, 2);
+        assert!(
+            !directory
+                .commit_ai(world.id, id, 7, 2, report, None)
+                .unwrap()
+        );
+        assert_eq!(
+            directory.read_world(world.id, 7).unwrap().organisms[&id]
+                .ai
+                .calls,
+            2
+        );
+    }
+
+    #[test]
+    fn tick_rejects_changed_world_and_pause_resume_snapshots() {
+        let directory = WorldDirectory::new(Arc::new(create_default_terrain_registry().unwrap()));
+        let world = directory.create_player_world(7, "tick", "tick").unwrap();
+        let before_add = world.world().unwrap();
+        let organism = test_organism(7);
+        let id = organism.id;
+        directory.add_organism(world.id, organism).unwrap();
+        assert!(
+            !directory
+                .commit_tick(world.id, &before_add, vec![])
+                .unwrap()
+        );
+        assert!(world.world().unwrap().organisms.contains_key(&id));
+        let before_pause = world.world().unwrap();
+        directory.set_status(world.id, WorldStatus::Paused).unwrap();
+        assert!(
+            !directory
+                .commit_tick(world.id, &before_pause, vec![])
+                .unwrap()
+        );
+        directory.set_status(world.id, WorldStatus::Active).unwrap();
+        assert!(
+            !directory
+                .commit_tick(world.id, &before_pause, vec![])
+                .unwrap()
+        );
+        let fresh = world.world().unwrap();
+        assert!(directory.commit_tick(world.id, &fresh, vec![]).unwrap());
+        assert!(!directory.commit_tick(world.id, &fresh, vec![]).unwrap());
+    }
+
+    #[test]
+    fn ai_completion_order_does_not_change_tick_and_motion_survives_restart() {
+        let storage = std::env::temp_dir().join(format!("life-motion-{}", Uuid::new_v4()));
+        let terrains = Arc::new(create_default_terrain_registry().unwrap());
+        let directory = WorldDirectory::new_with_storage(terrains.clone(), &storage).unwrap();
+        let first = directory.create_player_world(7, "one", "one").unwrap();
+        let second = directory.create_player_world(7, "two", "two").unwrap();
+        let organisms = [test_organism(7), test_organism(7)];
+        for world in [&first, &second] {
+            for organism in &organisms {
+                directory.add_organism(world.id, organism.clone()).unwrap();
+            }
+            let mut ids = organisms.iter().map(|o| o.id).collect::<Vec<_>>();
+            if world.id == second.id {
+                ids.reverse();
+            }
+            let results = ids
+                .into_iter()
+                .map(|id| AiCommit {
+                    organism_id: id,
+                    expected_calls: 0,
+                    report: crate::domain::organism::AiRunReport {
+                        ok: true,
+                        logs: String::new(),
+                        error: None,
+                        duration_ms: 0,
+                        commands: vec![],
+                        metrics: Default::default(),
+                    },
+                    memory: Some(Default::default()),
+                })
+                .collect();
+            assert!(
+                directory
+                    .commit_tick(world.id, &world.world().unwrap(), results)
+                    .unwrap()
+            );
+        }
+        let expected = first.world().unwrap();
+        assert_eq!(expected, second.world().unwrap());
+        directory.set_status(first.id, WorldStatus::Paused).unwrap();
+        let restored = WorldDirectory::new_with_storage(terrains, &storage).unwrap();
+        assert_eq!(restored.read_world(first.id, 7).unwrap(), expected);
+        restored.set_status(first.id, WorldStatus::Active).unwrap();
+        assert_eq!(restored.get(first.id).unwrap().world().unwrap(), expected);
+        fs::remove_dir_all(storage).unwrap();
     }
 
     #[test]
     fn ai_commit_waiting_on_runtime_lock_cannot_write_after_pause() {
-        let directory = Arc::new(WorldDirectory::new(Arc::new(create_default_terrain_registry().unwrap())));
+        let directory = Arc::new(WorldDirectory::new(Arc::new(
+            create_default_terrain_registry().unwrap(),
+        )));
         let world = directory.create_player_world(7, "pause", "pause").unwrap();
         let organism = test_organism(7);
         let id = organism.id;
@@ -737,18 +864,31 @@ mod tests {
         let worker = std::thread::spawn(move || {
             started_tx.send(()).unwrap();
             let report = crate::domain::organism::AiRunReport {
-                ok: true, logs: "should not commit".into(), error: None,
-                duration_ms: 0, commands: vec![], metrics: Default::default(),
+                ok: true,
+                logs: "should not commit".into(),
+                error: None,
+                duration_ms: 0,
+                commands: vec![],
+                metrics: Default::default(),
             };
-            let result = task_directory.commit_ai(world_id, id, 7, 0, report, Some(Default::default())).unwrap();
+            let result = task_directory
+                .commit_ai(world_id, id, 7, 0, report, Some(Default::default()))
+                .unwrap();
             finished_tx.send(result).unwrap();
         });
         started_rx.recv().unwrap();
-        assert!(matches!(finished_rx.recv_timeout(std::time::Duration::from_millis(50)), Err(std::sync::mpsc::RecvTimeoutError::Timeout)));
+        assert!(matches!(
+            finished_rx.recv_timeout(std::time::Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
         // Simulate set_status's transition while it owns the same runtime lock.
         world.pause();
         drop(guard);
-        assert!(!finished_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap());
+        assert!(
+            !finished_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap()
+        );
         worker.join().unwrap();
         assert_eq!(directory.read_world(world.id, 7).unwrap(), before);
     }
@@ -766,7 +906,7 @@ mod tests {
         state.durability = 42;
         state.container.non_gas_contents_mg.insert(
             crate::domain::element::ElementId::new("water").unwrap(),
-            100,
+            100.0,
         );
         directory.add_organism(world.id, organism.clone()).unwrap();
         assert!(directory.list_organisms(other.id, 7).unwrap().is_empty());
@@ -828,6 +968,104 @@ mod tests {
         let restored: World = serde_json::from_value(value).unwrap();
         assert!(restored.organisms.is_empty());
         assert_eq!(restored, world);
+    }
+
+    #[test]
+    fn absorption_and_world_matter_commit_restart_and_rollback_together() {
+        let storage = std::env::temp_dir().join(format!("life-paper-matter-{}", Uuid::new_v4()));
+        let terrains = Arc::new(create_default_terrain_registry().unwrap());
+        let directory = WorldDirectory::new_with_storage(terrains.clone(), &storage).unwrap();
+        let world = directory
+            .create_player_world(7, "matter", "matter")
+            .unwrap();
+        let registry = crate::domain::create_default_component_registry().unwrap();
+        let mut model =
+            crate::domain::BiologicalOrganism::new(crate::domain::OrganismProgramId::new());
+        let root = model.add_component("small_body_1", &registry).unwrap();
+        let organ = model
+            .add_component("absorption_organ_1", &registry)
+            .unwrap();
+        model.connect(root, organ, &registry).unwrap();
+        let mut organism = crate::domain::organism::OrganismInstance::from_model(
+            model.id,
+            7,
+            "matter".into(),
+            model,
+            &registry,
+        )
+        .unwrap();
+        organism.position = crate::domain::MapPosition { x: 200, y: 200 };
+        organism
+            .ai
+            .pending_commands
+            .push(crate::domain::organism_component::ComponentCommand {
+                component_id: organ,
+                action: crate::domain::organism_component::ComponentAction::AbsorbMatter {
+                    rate_mg_per_tick: 50.0,
+                },
+            });
+        let first_id = organism.id;
+        directory.add_organism(world.id, organism.clone()).unwrap();
+        organism.id = Uuid::new_v4();
+        organism.composition.id = organism.id;
+        organism.composition.program_id = crate::domain::OrganismProgramId::from_uuid(organism.id);
+        directory.add_organism(world.id, organism).unwrap();
+        directory.set_status(world.id, WorldStatus::Active).unwrap();
+        let before = world.world().unwrap();
+        assert!(directory.commit_tick(world.id, &before, vec![]).unwrap());
+        let after = world.world().unwrap();
+        assert_eq!(after.matter.tick, 1);
+        assert_eq!(after.matter.records.len(), 2);
+        assert!(after.matter.records.iter().all(|record| {
+            let source = record.source.as_ref().unwrap();
+            after.organisms.contains_key(&source.organism_id)
+                && source.component_id == organ
+                && record.tick == after.matter.tick
+                && record.expires_at_tick.unwrap() > record.tick
+        }));
+        assert!(
+            (after.organisms[&first_id].component_states[&root]
+                .container
+                .non_gas_contents_mg
+                .values()
+                .sum::<f64>()
+                - 50.0)
+                .abs()
+                < 1e-9
+        );
+        let removed: f64 = after
+            .matter
+            .records
+            .iter()
+            .flat_map(|r| r.absorbed_mg.values())
+            .sum();
+        assert!((removed - 100.0).abs() < 1e-9);
+        let record = &after.matter.records[0];
+        let initial_mass: f64 = before
+            .matter
+            .area(&before, record.center, record.radius_px)
+            .unwrap()
+            .total_mg
+            .values()
+            .sum();
+        let final_mass: f64 = after
+            .matter
+            .area(&after, record.center, record.radius_px)
+            .unwrap()
+            .total_mg
+            .values()
+            .sum();
+        assert!((initial_mass - final_mass - removed).abs() < 1e-8);
+        let restarted = WorldDirectory::new_with_storage(terrains, &storage).unwrap();
+        assert_eq!(
+            restarted.read_world(world.id, 7).unwrap().as_ref(),
+            after.as_ref()
+        );
+        fs::remove_dir_all(&storage).unwrap();
+        fs::write(&storage, b"blocked").unwrap();
+        assert!(directory.commit_tick(world.id, &after, vec![]).is_err());
+        assert_eq!(world.world().unwrap().as_ref(), after.as_ref());
+        fs::remove_file(storage).unwrap();
     }
 
     #[test]

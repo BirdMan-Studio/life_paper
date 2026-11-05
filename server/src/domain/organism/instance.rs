@@ -8,15 +8,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct ContainerState {
     pub non_gas_capacity_mg: u64,
     pub gas_capacity_ul: u64,
-    pub non_gas_contents_mg: BTreeMap<ElementId, u64>,
+    pub non_gas_contents_mg: BTreeMap<ElementId, f64>,
     pub gas_contents_ul: BTreeMap<ElementId, u64>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ComponentState {
     pub properties: ComponentProperties,
     pub durability: u32,
@@ -33,6 +33,8 @@ pub struct OrganismInstance {
     pub name: String,
     pub position: MapPosition,
     pub rotation_mdeg: i32,
+    #[serde(default)]
+    pub motion: Option<crate::game::dynamics::MotionState>,
     pub composition: BiologicalOrganism,
     pub component_states: BTreeMap<Uuid, ComponentState>,
     #[serde(default)]
@@ -109,6 +111,7 @@ impl OrganismInstance {
             name,
             position: MapPosition::default(),
             rotation_mdeg: 0,
+            motion: None,
             composition,
             component_states,
             ai: Default::default(),
@@ -159,7 +162,7 @@ mod tests {
         );
         assert_eq!(
             first.component_states[&body].container.gas_capacity_ul,
-            4_000
+            20_000
         );
         assert_eq!(
             first.component_states[&reaction]
@@ -169,7 +172,7 @@ mod tests {
         );
         assert_eq!(
             first.component_states[&gas].container.gas_capacity_ul,
-            8_000
+            40_000
         );
         assert!(first.component_states.values().all(|state| state.energy_mj
             == state.properties.energy_capacity_mj

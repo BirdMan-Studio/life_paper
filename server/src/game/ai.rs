@@ -101,8 +101,10 @@ impl AiContext {
         struct Request {
             component_id: uuid::Uuid,
             method: String,
-            rate_mg_per_tick: f64,
+            rate_mg_per_tick: Option<f64>,
+            rate_ml_per_tick: Option<f64>,
             material: Option<String>,
+            angle_deg: Option<f64>,
         }
         let error =
             |code: &str, message: &str| json!({"error": {"code": code, "message": message}});
@@ -131,9 +133,39 @@ impl AiContext {
                 "this component does not support the requested method",
             )
         })?;
-        spec.validate(request.rate_mg_per_tick)
-            .map_err(|message| error("BAD_REQUEST", message))?;
-        let rate_mg_per_tick = request.rate_mg_per_tick;
+        let is_air = request.method == "absorb_air";
+        let rate_mg_per_tick = if is_air {
+            if request.rate_mg_per_tick.is_some() {
+                return Err(error("BAD_REQUEST", "absorb_air requires mL/tick"));
+            }
+            request.rate_ml_per_tick
+        } else {
+            if request.rate_ml_per_tick.is_some() {
+                return Err(error("BAD_REQUEST", "this method requires mg/tick"));
+            }
+            request.rate_mg_per_tick
+        }
+        .ok_or_else(|| error("BAD_REQUEST", "missing rate"))?;
+        let validation = if is_air {
+            if rate_mg_per_tick.is_finite() && (0.0..=5.0).contains(&rate_mg_per_tick) {
+                Ok(())
+            } else {
+                Err("air rate must be between 0 and 5 mL/tick")
+            }
+        } else {
+            spec.validate(rate_mg_per_tick)
+        };
+        validation.map_err(|message| error("BAD_REQUEST", message))?;
+        let angle_deg = request.angle_deg.unwrap_or(0.0);
+        if !angle_deg.is_finite()
+            || !(-5.0..=5.0).contains(&angle_deg)
+            || (request.method != "jet" && request.angle_deg.is_some())
+        {
+            return Err(error(
+                "BAD_REQUEST",
+                "jet angle must be between -5 and 5 degrees",
+            ));
+        }
         let action = match request.method.as_str() {
             "jet" => {
                 let material = request
@@ -145,6 +177,7 @@ impl AiContext {
                 ComponentAction::Jet {
                     material,
                     rate_mg_per_tick,
+                    angle_deg,
                 }
             }
             _ if request.material.is_some() => {
@@ -153,7 +186,9 @@ impl AiContext {
                     "absorption does not accept a material parameter",
                 ));
             }
-            "absorb_air" => ComponentAction::AbsorbAir { rate_mg_per_tick },
+            "absorb_air" => ComponentAction::AbsorbAir {
+                rate_ml_per_tick: rate_mg_per_tick,
+            },
             _ => ComponentAction::AbsorbMatter { rate_mg_per_tick },
         };
         Ok(ComponentCommand {
@@ -196,7 +231,8 @@ impl AiContext {
                 let properties = self.world.ground_properties(position);
                 json!({"data": {"x": x, "y": y, "terrain": self.world.terrain_at(position),
                     "height": properties.height, "moisture": properties.moisture,
-                    "nutrients": properties.nutrients, "temperature": properties.temperature}})
+                    "nutrients": properties.nutrients, "temperature": properties.temperature,
+                    "matter_mg": self.world.matter.at(&self.world, position)}})
             }
             "get_organisms" => {
                 let Some(offset) = params["offset"]
@@ -982,7 +1018,7 @@ mod tests {
         assert!(output.report.ok, "{:?}", output.report);
         assert_eq!(output.report.commands.len(), 2);
         assert!(
-            matches!(&output.report.commands[0].action, ComponentAction::Jet { material, rate_mg_per_tick } if material == "water" && *rate_mg_per_tick == 31.0)
+            matches!(&output.report.commands[0].action, ComponentAction::Jet { material, rate_mg_per_tick, angle_deg } if material == "water" && *rate_mg_per_tick == 31.0 && *angle_deg == 0.0)
         );
         assert_eq!(
             output.report.commands[1].action,
@@ -995,6 +1031,12 @@ mod tests {
         let world = f.worlds.read_world(f.metadata.id, 7).unwrap();
         let organism = &world.organisms[&f.id];
         assert_eq!(organism.ai.pending_commands, commands);
+        let motion = organism.motion.as_ref().unwrap();
+        assert_eq!(
+            motion.velocity_x.hypot(motion.velocity_y),
+            0.0,
+            "empty water inventory must not generate thrust"
+        );
         assert!(
             organism
                 .component_states
@@ -1024,10 +1066,37 @@ mod tests {
         assert!(f.context().organism.ai.pending_commands.is_empty());
     }
 
+    #[tokio::test]
+    async fn python_jet_records_deflection_and_rejects_invalid_angles() {
+        use crate::domain::organism_component::ComponentAction;
+        let f = Fixture::with_components(true, false, &["jet_organ_1"]);
+        let output = f.execute("def main(game):\n    jet = next(p for p in game.me.components.values() if p.component == 'jet_organ_1')\n    for angle in [True, float('nan'), '3', 5.1, -5.1]:\n        try:\n            jet.jet('water', 31, angle=angle)\n        except (TypeError, ValueError):\n            pass\n        else:\n            raise AssertionError('invalid angle accepted')\n    assert jet.jet('water', 31, angle=2.6) == 31\n", 5000, 256).await;
+        assert!(output.report.ok, "{:?}", output.report);
+        assert!(matches!(
+            output.report.commands[0].action,
+            ComponentAction::Jet { angle_deg: 2.6, .. }
+        ));
+    }
+
     #[test]
     fn component_recording_validates_parameters_but_defers_durability_to_the_game_loop() {
         let f = Fixture::with_components(true, false, &["jet_organ_1", "absorption_organ_1"]);
         let mut context = f.context();
+        let absorber = context
+            .organism
+            .composition
+            .components
+            .values()
+            .find(|p| p.component.as_str() == "absorption_organ_1")
+            .unwrap()
+            .id;
+        for rate in [0.0, 0.5, 2.7, 5.0] {
+            assert!(context.component_command(&json!({"component_id": absorber, "method": "absorb_air", "rate_ml_per_tick": rate})).is_ok());
+        }
+        for rate in [-1.0, 5.1] {
+            assert!(context.component_command(&json!({"component_id": absorber, "method": "absorb_air", "rate_ml_per_tick": rate})).is_err());
+        }
+        assert!(context.component_command(&json!({"component_id": absorber, "method": "absorb_air", "rate_mg_per_tick": 2})).is_err());
         let id = context
             .organism
             .composition
@@ -1038,6 +1107,16 @@ mod tests {
             .id;
         let valid = json!({"component_id": id, "method": "jet", "material": "water", "rate_mg_per_tick": 31});
         assert!(context.component_command(&valid).is_ok());
+        for angle in [-5.0, -2.4, 0.0, 5.0] {
+            let mut request = valid.clone();
+            request["angle_deg"] = json!(angle);
+            assert!(context.component_command(&request).is_ok());
+        }
+        for angle in [-5.1, 5.1] {
+            let mut request = valid.clone();
+            request["angle_deg"] = json!(angle);
+            assert!(context.component_command(&request).is_err());
+        }
         for (field, value) in [
             ("component_id", json!(Uuid::new_v4())),
             ("method", json!("absorb_air")),
@@ -1064,6 +1143,13 @@ mod tests {
     async fn latest_component_output_overwrites_the_rate_and_material_including_zero() {
         use crate::domain::organism_component::ComponentAction;
         let f = Fixture::with_components(true, false, &["jet_organ_1"]);
+        // Resolve the legacy origin-on-wall spawn before checking zero thrust.
+        let initial = f.metadata.world().unwrap();
+        assert!(
+            f.worlds
+                .commit_tick(f.metadata.id, &initial, vec![])
+                .unwrap()
+        );
         let before = f.context().organism;
         let output = f.execute("def main(game):\n    jet = next(part for part in game.me.components.values() if part.component == 'jet_organ_1')\n    jet.jet('water', 31)\n    jet.jet('oxygen', 0)\n", 5000, 256).await;
         assert!(output.report.ok, "{:?}", output.report);
@@ -1072,7 +1158,8 @@ mod tests {
             output.report.commands[0].action,
             ComponentAction::Jet {
                 material: "oxygen".into(),
-                rate_mg_per_tick: 0.0
+                rate_mg_per_tick: 0.0,
+                angle_deg: 0.0,
             }
         );
         let commands = output.report.commands.clone();

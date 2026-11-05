@@ -78,7 +78,7 @@ impl PhaseArealDensity {
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ElementPhysicalProperties {
     pub areal_density: PhaseArealDensity,
-    pub melting_point_celsius: f64,
+    pub melting_point_celsius: Option<f64>,
     pub boiling_point_celsius: Option<f64>,
 }
 
@@ -90,7 +90,7 @@ impl ElementPhysicalProperties {
     ) -> Self {
         Self {
             areal_density,
-            melting_point_celsius,
+            melting_point_celsius: Some(melting_point_celsius),
             boiling_point_celsius,
         }
     }
@@ -111,6 +111,15 @@ pub struct ElementDefinition {
     pub symbol: String,
     pub category: ElementCategory,
     pub physical: ElementPhysicalProperties,
+    /// Fraction of allocated reaction capacity converted to effective processing.
+    #[serde(default = "default_processing_speed")]
+    pub initial_processing_speed: f64,
+    #[serde(default)]
+    pub chemistry: Option<super::chemistry::ChemicalProperties>,
+}
+
+pub(super) const fn default_processing_speed() -> f64 {
+    1.0
 }
 
 impl ElementDefinition {

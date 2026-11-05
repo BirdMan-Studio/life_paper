@@ -5,8 +5,8 @@ use crate::{
 };
 use axum::{
     Json, Router,
-    extract::Path,
     extract::State,
+    extract::{Path, Query},
     http::{HeaderMap, StatusCode},
     routing::{get, post},
 };
@@ -18,6 +18,8 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/worlds", get(list_worlds).post(create_player_world))
         .route("/worlds/{world_id}/ground", get(get_ground))
+        .route("/worlds/{world_id}/matter", get(get_matter))
+        .route("/worlds/{world_id}/matter/history", get(get_matter_history))
         .route("/worlds/{world_id}/organisms/{organism_id}/ai", get(get_ai))
         .route(
             "/worlds/{world_id}/organisms",
@@ -39,6 +41,79 @@ struct CreateWorldRequest {
     name: Option<String>,
     #[serde(default)]
     ai_full_visibility: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MatterQuery {
+    x: i32,
+    y: i32,
+    radius_px: u32,
+    since: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MatterHistoryQuery {
+    #[serde(default)]
+    after: u64,
+    #[serde(default = "default_history_limit")]
+    limit: u32,
+}
+
+fn default_history_limit() -> u32 {
+    100
+}
+
+async fn get_matter(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(world_id): Path<Uuid>,
+    Query(query): Query<MatterQuery>,
+) -> Result<Json<DataResponse<crate::domain::world::MatterSync>>, ApiError> {
+    let session = authenticate(&state, &headers).await?;
+    let data = tokio::task::spawn_blocking(move || {
+        let world = state
+            .worlds
+            .read_world(world_id, session.user_id)
+            .map_err(map_world_error)?;
+        world
+            .matter
+            .sync(
+                crate::domain::MapPosition {
+                    x: query.x,
+                    y: query.y,
+                },
+                query.radius_px,
+                query.since,
+            )
+            .map_err(|message| ApiError::BadRequest(message.into()))
+    })
+    .await
+    .map_err(|_| ApiError::Internal)??;
+    Ok(Json(DataResponse { data }))
+}
+
+async fn get_matter_history(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(world_id): Path<Uuid>,
+    Query(query): Query<MatterHistoryQuery>,
+) -> Result<Json<DataResponse<crate::domain::world::MatterHistory>>, ApiError> {
+    let session = authenticate(&state, &headers).await?;
+    let data = tokio::task::spawn_blocking(move || {
+        let world = state
+            .worlds
+            .read_world(world_id, session.user_id)
+            .map_err(map_world_error)?;
+        world
+            .matter
+            .history(query.after, query.limit)
+            .map_err(|message| ApiError::BadRequest(message.into()))
+    })
+    .await
+    .map_err(|_| ApiError::Internal)??;
+    Ok(Json(DataResponse { data }))
 }
 
 async fn owned_organism(
@@ -139,7 +214,7 @@ async fn create_organism(
         tracing::error!(target: "api", %error, "failed to decode organism model");
         ApiError::Internal
     })?;
-    let organism = crate::domain::organism::OrganismInstance::from_model(
+    let mut organism = crate::domain::organism::OrganismInstance::from_model(
         record.id,
         session.user_id,
         record.name,
@@ -147,14 +222,16 @@ async fn create_organism(
         &state.components,
     )
     .map_err(ApiError::BadRequest)?;
-    let result = organism.clone();
     let worlds = state.worlds.clone();
     let source = state.organism_model_storage.join(record.id.to_string());
     let target = state
         .organism_instance_storage
         .join(organism.id.to_string());
-    tokio::task::spawn_blocking(move || {
+    let result = tokio::task::spawn_blocking(move || {
         let _guard = storage_guard;
+        worlds
+            .place_organism(world_id, &mut organism)
+            .map_err(map_world_error)?;
         crate::domain::organism::program_storage::clone_program(&source, &target).map_err(
             |error| {
                 tracing::error!(%error, "failed to clone instance program");
@@ -165,11 +242,12 @@ async fn create_organism(
                 }
             },
         )?;
+        let result = organism.clone();
         if let Err(error) = worlds.add_organism(world_id, organism) {
             let _ = std::fs::remove_dir_all(&target);
             return Err(map_world_error(error));
         }
-        Ok::<_, ApiError>(())
+        Ok::<_, ApiError>(result)
     })
     .await
     .map_err(|_| ApiError::Internal)??;

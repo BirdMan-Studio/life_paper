@@ -11,7 +11,7 @@ axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
 anyhow = "1"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = "0.10"
 argon2 = "0.5"
 chrono = { version = "0.4", features = ["serde"] }
@@ -20,6 +20,7 @@ toml = "1.1.6"
 config = "0.15.26"
 dotenvy = "0.15.7"
 noise = "0.9"
+rapier2d-f64 = "0.22"
 sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "macros", "migrate"] }
 deadpool-redis = { version = "0.23.1", features = ["rt_tokio_1"] }
 redis = "1.7.1"

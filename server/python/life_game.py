@@ -41,26 +41,29 @@ class Component(ReadOnly):
         object.__setattr__(self, "_query", query)
 
     def _control(self, method, rate, **params):
+        rate_key = "rate_ml_per_tick" if method == "absorb_air" else "rate_mg_per_tick"
         if type(rate) not in (int, float) or not math.isfinite(rate):
-            raise TypeError("rate must be a finite number in mg/tick")
+            raise TypeError("rate must be a finite number")
         command = self._query("component_command", {
             "component_id": self.id, "method": method,
-            "rate_mg_per_tick": rate, **params,
+            rate_key: rate, **params,
         })
-        return command["action"]["rate_mg_per_tick"]
+        return command["action"][rate_key]
 
 
 class JetControl:
-    def jet(self, material, rate):
+    def jet(self, material, rate, angle=0):
         """Record the requested rate unchanged; the latest component output wins."""
         if not isinstance(material, str):
             raise TypeError("material must be a registered substance ID")
-        return self._control("jet", rate, material=material)
+        if type(angle) not in (int, float) or not math.isfinite(angle):
+            raise TypeError("angle must be a finite number in degrees")
+        return self._control("jet", rate, material=material, angle_deg=angle)
 
 
 class AbsorptionControl:
     def absorb_air(self, rate):
-        """Request air absorption in mg/tick; world execution checks submersion."""
+        """Request 0..5 mL/tick of air; execution rounds down to 0.5 mL steps."""
         return self._control("absorb_air", rate)
 
     def absorb_matter(self, rate):

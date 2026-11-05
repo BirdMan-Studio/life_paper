@@ -1,5 +1,5 @@
 <script setup>
-import { ChevronRight, FlaskConical, Globe2, Menu, Settings, Sparkles, BrainCircuit } from 'lucide-vue-next'
+import { BookOpen, ChevronRight, FlaskConical, Globe2, Menu, Settings, Sparkles, BrainCircuit } from 'lucide-vue-next'
 import { useI18n } from '../i18n'
 defineProps({ route: String, compact: Boolean })
 const emit = defineEmits(['navigate', 'toggle'])
@@ -8,6 +8,7 @@ const items = [
   { id: 'world', key: 'nav.world', icon: Globe2 },
   { id: 'creatures', key: 'nav.creatures', icon: FlaskConical },
   { id: 'models', key: 'nav.models', icon: BrainCircuit },
+  { id: 'docs', key: 'nav.docs', icon: BookOpen },
   { id: 'settings', key: 'nav.settings', icon: Settings },
 ]
 </script>

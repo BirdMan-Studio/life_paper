@@ -114,7 +114,7 @@ pub fn create_default_component_registry() -> Result<ComponentRegistry, Componen
             Some(40_000),
             1_000,
             2_000,
-            4_000,
+            20_000,
             -10,
             2,
             0,
@@ -161,7 +161,7 @@ pub fn create_default_component_registry() -> Result<ComponentRegistry, Componen
             0,
         ),
         ("sensor_group_1", 20, 2, 1, None, 0, 0, 0, 0, 0, 2),
-        ("gas_chamber_1", 10, 2, 1, None, 0, 0, 8_000, 0, 0, 0),
+        ("gas_chamber_1", 10, 2, 1, None, 0, 0, 40_000, 0, 0, 0),
     ] {
         registry.set_properties(
             id,

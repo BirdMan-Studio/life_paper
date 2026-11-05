@@ -1,4 +1,5 @@
 mod builtin;
+pub mod chemistry;
 mod definition;
 mod registry;
 mod storage;

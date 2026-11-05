@@ -39,3 +39,12 @@ export const organismApi = {
 export const modelApi = { list: () => apiRequest('/organism-models'), create: (payload) => apiRequest('/organism-models', { method: 'POST', body: JSON.stringify(payload) }), remove: (id) => apiRequest(`/organism-models/${id}`, { method: 'DELETE' }), folder: (id, path = '') => apiRequest(`/organism-models/${id}/folder?${new URLSearchParams({ path })}`), file: async (id, path) => (await apiRequestRaw(`/organism-models/${id}/files?${new URLSearchParams({ path })}`)).text(), upload: (id, path, file) => apiRequestRaw(`/organism-models/${id}/files?${new URLSearchParams({ path })}`, { method: 'PUT', body: file }), createFolder: (id, path) => apiRequest(`/organism-models/${id}/folders`, { method: 'POST', body: JSON.stringify({ path }) }), deleteEntry: (id, path) => apiRequest(`/organism-models/${id}/entries?${new URLSearchParams({ path })}`, { method: 'DELETE' }), renameEntry: (id, path, name) => apiRequest(`/organism-models/${id}/entries`, { method: 'PATCH', body: JSON.stringify({ path, name }) }) }
 export const componentApi = { all: () => apiRequest('/organism-components'), unlocked: () => apiRequest('/organism-components/unlocked'), locked: () => apiRequest('/organism-components/locked'), unlock: (id) => apiRequest(`/organism-components/${id}/unlock`, { method: 'POST' }) }
 export const storageKeys = { SERVER_KEY, TOKEN_KEY }
+export const pythonApi = { documentation: () => apiRequest('/python-api') }
+export const worldMatterApi = {
+  sync: (worldId, { x, y, radius_px = 5, since } = {}) => {
+    const query = new URLSearchParams({ x, y, radius_px })
+    if (since !== undefined && since !== null) query.set('since', since)
+    return apiRequest(`/worlds/${worldId}/matter?${query}`)
+  },
+  history: (worldId, after = 0, limit = 100) => apiRequest(`/worlds/${worldId}/matter/history?${new URLSearchParams({ after, limit })}`),
+}

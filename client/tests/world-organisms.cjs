@@ -114,6 +114,35 @@ const assert = require('node:assert/strict');
     const located = await tileAt();
     assert(Math.abs(located[0] - 720) <= 1 && Math.abs(located[1] + 480) <= 1, 'Locate must preserve world Y direction');
     assert(Math.abs((await tileAt(50))[0] - located[0] - scale) <= 1, 'Locate must preserve zoom');
+    async function canvasPixels() {
+      return page.evaluate(() => new Promise(resolve => {
+        window.dispatchEvent(new Event('resize'));
+        requestAnimationFrame(() => {
+          const source = document.querySelector('.world-canvas canvas');
+          const copy = document.createElement('canvas');
+          copy.width = source.width; copy.height = source.height;
+          const context = copy.getContext('2d');
+          context.drawImage(source, 0, 0);
+          const pixels = context.getImageData(0, 0, copy.width, copy.height).data;
+          let red = 0, x = 0, y = 0;
+          for (let i = 0; i < pixels.length; i += 4) {
+            if (pixels[i] > 150 && pixels[i + 1] < 80 && pixels[i + 2] < 80) {
+              red++; x += (i / 4) % copy.width; y += Math.floor(i / 4 / copy.width);
+            }
+          }
+          resolve({ red, x: x / red, y: y / red });
+        });
+      }));
+    }
+    const beforeMotion = await canvasPixels();
+    assert(beforeMotion.red > 30, 'The organism must render as nonblank canvas pixels');
+    instances.first[0].position = { x: 744, y: -464 };
+    instances.first[0].rotation_mdeg = 45000;
+    await page.waitForFunction(() => document.querySelector('.world-creature-identity small')?.textContent.includes('(744, -464)'));
+    assert((await firstRow.locator('small').textContent()).includes('45°'), 'Polling must update direction as well as position');
+    const afterMotion = await canvasPixels();
+    assert(afterMotion.red > 30 && afterMotion.x > beforeMotion.x + 5 && afterMotion.y > beforeMotion.y + 5,
+      'Polled motion must visibly move the organism on the canvas');
     await firstRow.getByTitle('查看日志', { exact: true }).click();
     await page.getByText('暂无运行记录', { exact: true }).waitFor();
     failLogs = true;
@@ -200,6 +229,8 @@ const assert = require('node:assert/strict');
     await page.keyboard.press('Escape');
     for (const width of [1280, 390]) {
       await page.setViewportSize({ width, height: 800 });
+      await firstRow.getByTitle('定位生物', { exact: true }).click();
+      assert((await canvasPixels()).red > 30, `The organism must render at width ${width}`);
       await firstRow.locator('strong').evaluate(node => { node.textContent = 'A very long organism name '.repeat(8); });
       await page.waitForFunction(() => document.documentElement.scrollWidth <= innerWidth);
       const overflow = await page.evaluate(() => [...document.querySelectorAll('*')].filter(node => node.getBoundingClientRect().right > innerWidth + 1).map(node => `${node.tagName}.${node.className}`).slice(0, 12));

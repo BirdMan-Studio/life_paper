@@ -29,11 +29,14 @@ impl TerrainRegistry {
         self.definitions.insert(
             id.clone(),
             TerrainDefinition {
-                id,
+                id: id.clone(),
                 name: name.into(),
                 slows_movement,
                 blocks_movement,
+                linear_damping: None,
+                angular_damping: None,
                 generates_oxygen,
+                allows_air_absorption: !blocks_movement && id.as_str() != "deep_water",
                 generated_matter_recipe: generated_matter_recipe.map(str::to_owned),
                 visual: TerrainVisual::default(),
             },

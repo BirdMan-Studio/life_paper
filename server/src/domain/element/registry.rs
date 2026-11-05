@@ -35,6 +35,8 @@ impl ElementRegistry {
             symbol: symbol.into(),
             category,
             physical,
+            initial_processing_speed: super::definition::default_processing_speed(),
+            chemistry: None,
         };
         self.definitions.insert(id, definition);
         Ok(())
@@ -44,8 +46,39 @@ impl ElementRegistry {
         self.definitions.get(id)
     }
 
+    pub fn set_initial_processing_speed(
+        &mut self,
+        id: &str,
+        speed: f64,
+    ) -> Result<(), ElementRegistrationError> {
+        if !speed.is_finite() || !(0.0..=1.0).contains(&speed) {
+            return Err(ElementRegistrationError::InvalidProcessingSpeed(id.into()));
+        }
+        let definition = self
+            .definitions
+            .get_mut(id)
+            .ok_or_else(|| ElementRegistrationError::UnknownElement(id.into()))?;
+        definition.initial_processing_speed = speed;
+        Ok(())
+    }
+
     pub fn contains(&self, id: &str) -> bool {
         self.definitions.contains_key(id)
+    }
+
+    pub fn set_chemistry(
+        &mut self,
+        id: &str,
+        chemistry: super::chemistry::ChemicalProperties,
+    ) -> Result<(), ElementRegistrationError> {
+        if !chemistry.is_valid() {
+            return Err(ElementRegistrationError::InvalidChemistry(id.into()));
+        }
+        self.definitions
+            .get_mut(id)
+            .ok_or_else(|| ElementRegistrationError::UnknownElement(id.into()))?
+            .chemistry = Some(chemistry);
+        Ok(())
     }
 
     pub fn len(&self) -> usize {
@@ -65,6 +98,9 @@ impl ElementRegistry {
 pub enum ElementRegistrationError {
     InvalidId(String),
     DuplicateId(ElementId),
+    UnknownElement(String),
+    InvalidProcessingSpeed(String),
+    InvalidChemistry(String),
 }
 
 impl fmt::Display for ElementRegistrationError {
@@ -72,6 +108,11 @@ impl fmt::Display for ElementRegistrationError {
         match self {
             Self::InvalidId(id) => write!(formatter, "invalid element id: {id}"),
             Self::DuplicateId(id) => write!(formatter, "element id already registered: {id}"),
+            Self::UnknownElement(id) => write!(formatter, "unknown element: {id}"),
+            Self::InvalidProcessingSpeed(id) => {
+                write!(formatter, "invalid processing speed for element: {id}")
+            }
+            Self::InvalidChemistry(id) => write!(formatter, "invalid chemistry for element: {id}"),
         }
     }
 }

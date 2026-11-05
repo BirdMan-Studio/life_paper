@@ -100,6 +100,8 @@ impl ComponentRegistry {
                     .any(|rate| {
                         rate.subdivisions == 0
                             || rate.max_rate_mg_per_tick == 0
+                            || rate.max_rate_ml_per_tick == Some(0)
+                            || rate.max_gas_rate_ml_per_tick == Some(0)
                             || rate.max_rate_mg_per_tick % rate.subdivisions != 0
                     })
             })

@@ -39,6 +39,9 @@ async function refreshOrganismStates() {
       if (latest) {
         current.component_states = latest.component_states
         current.ai = latest.ai
+        current.position = latest.position
+        current.rotation_mdeg = latest.rotation_mdeg
+        current.motion = latest.motion
       }
     }
   } catch { /* Retry on the next poll without interrupting the editor. */ }

@@ -1,3 +1,4 @@
+use crate::domain::world::AiCommit;
 use crate::{
     domain::{World, WorldDirectory, WorldStatus},
     game::ai::{AiContext, AiRuntime},
@@ -18,6 +19,9 @@ struct WorldTick {
     pending: VecDeque<Uuid>,
     running: usize,
     next_tick: Instant,
+    results: Vec<AiCommit>,
+    committing: bool,
+    finished: bool,
 }
 
 pub async fn run(
@@ -31,6 +35,7 @@ pub async fn run(
     let mut ticks: HashMap<Uuid, WorldTick> = HashMap::new();
     let mut ready = VecDeque::new();
     let mut jobs = JoinSet::new();
+    let mut commits = JoinSet::new();
     let mut job_worlds = HashMap::new();
     let mut poll = tokio::time::interval(Duration::from_millis(50));
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -40,7 +45,12 @@ pub async fn run(
             _ = poll.tick() => {},
             Some(result) = jobs.join_next_with_id(), if !jobs.is_empty() => {
                 let task_id = match result {
-                    Ok((task_id, ())) => task_id,
+                    Ok((task_id, result)) => {
+                        if let Some(id) = job_worlds.get(&task_id) {
+                            if let Some(tick) = ticks.get_mut(id) { tick.results.push(result); }
+                        }
+                        task_id
+                    },
                     Err(error) => {
                         tracing::warn!(target: "game", %error, "AI scheduling task failed");
                         error.id()
@@ -50,18 +60,40 @@ pub async fn run(
                     if let Some(tick) = ticks.get_mut(&id) { tick.running -= 1; }
                 }
             }
+            Some(result) = commits.join_next(), if !commits.is_empty() => {
+                if let Ok(id) = result {
+                    if let Some(tick) = ticks.get_mut(&id) {
+                        tick.committing = false;
+                        tick.finished = true;
+                    }
+                }
+            }
         }
-        if !runtime.config.enabled {
-            continue;
+
+        for (&id, tick) in &mut ticks {
+            if tick.running == 0 && tick.pending.is_empty() && !tick.committing && !tick.finished {
+                tick.committing = true;
+                let worlds = worlds.clone();
+                let snapshot = tick.snapshot.clone();
+                let results = std::mem::take(&mut tick.results);
+                commits.spawn(async move {
+                    match tokio::task::spawn_blocking(move || worlds.commit_tick(id, &snapshot, results)).await {
+                        Ok(Ok(_)) => {},
+                        result => tracing::warn!(target: "game", ?result, %id, "failed to commit world tick"),
+                    }
+                    id
+                });
+            }
         }
 
         // Each world owns its tick barrier; a slow world cannot delay another
         // world's next tick. Pending work stays as IDs rather than spawned tasks.
         for metadata in worlds.active_worlds() {
             let id = metadata.id;
-            if ticks.get(&id).is_some_and(|tick| {
-                tick.running > 0 || !tick.pending.is_empty() || Instant::now() < tick.next_tick
-            }) {
+            if ticks
+                .get(&id)
+                .is_some_and(|tick| !tick.finished || Instant::now() < tick.next_tick)
+            {
                 continue;
             }
             let Some(snapshot) = metadata.world() else {
@@ -71,10 +103,11 @@ pub async fn run(
                 .organisms
                 .values()
                 .filter(|organism| {
-                    organism
-                        .component_states
-                        .values()
-                        .any(|state| state.energy_mj > 0)
+                    runtime.config.enabled
+                        && organism
+                            .component_states
+                            .values()
+                            .any(|state| state.energy_mj > 0)
                 })
                 .map(|organism| organism.id)
                 .collect::<VecDeque<_>>();
@@ -86,6 +119,9 @@ pub async fn run(
                     pending,
                     running: 0,
                     next_tick: Instant::now() + TICK_INTERVAL,
+                    results: Vec::new(),
+                    committing: false,
+                    finished: false,
                 },
             );
             if has_work && !ready.contains(&id) {
@@ -98,7 +134,7 @@ pub async fn run(
                 .is_none_or(|world| world.status() != WorldStatus::Active)
             {
                 tick.pending.clear();
-                return tick.running > 0;
+                return tick.running > 0 || tick.committing;
             }
             true
         });
@@ -126,24 +162,33 @@ pub async fn run(
             tick.running += 1;
             let snapshot = tick.snapshot.clone();
             let runtime = runtime.clone();
-            let worlds = worlds.clone();
             let elements = elements.clone();
             let source = instance_storage.join(organism_id.to_string());
             let storage_lock = model_storage_lock.clone();
             let handle = jobs.spawn(async move {
                 let organism = &snapshot.organisms[&organism_id];
                 let expected_calls = organism.ai.calls;
-                let owner_user_id = organism.owner_user_id;
                 let context = AiContext::new(&metadata, snapshot.clone(), organism, elements);
-                match runtime.run_scheduled(&source, storage_lock, context).await {
-                    Ok(output) => {
-                        // Snapshot persistence is blocking; keep it off Tokio's executor.
-                        match tokio::task::spawn_blocking(move || worlds.commit_ai(id, organism_id, owner_user_id, expected_calls, output.report, output.memory)).await {
-                            Ok(Ok(_)) => {},
-                            result => tracing::warn!(target: "game", ?result, %organism_id, "failed to commit tick AI result"),
-                        }
-                    }
-                    Err(error) => tracing::warn!(target: "game", %organism_id, %error, "tick AI execution failed"),
+                let output = runtime.run_scheduled(&source, storage_lock, context).await;
+                let (report, memory) = match output {
+                    Ok(output) => (output.report, output.memory),
+                    Err(error) => (
+                        crate::domain::organism::AiRunReport {
+                            ok: false,
+                            logs: String::new(),
+                            error: Some(error.to_string()),
+                            duration_ms: 0,
+                            commands: Vec::new(),
+                            metrics: Default::default(),
+                        },
+                        None,
+                    ),
+                };
+                AiCommit {
+                    organism_id,
+                    expected_calls,
+                    report,
+                    memory,
                 }
             });
             job_worlds.insert(handle.id(), id);

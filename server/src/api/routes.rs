@@ -6,6 +6,7 @@ use tower_http::cors::CorsLayer;
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(root))
+        .route("/api/v1/python-api", get(super::python_docs::catalog))
         .nest("/api/v1", auth::routes())
         .nest("/api/v1", super::organism_component::routes())
         .nest("/api/v1", super::organism_model::routes())

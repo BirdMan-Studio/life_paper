@@ -47,11 +47,21 @@ pub struct TerrainDefinition {
     pub name: String,
     pub slows_movement: bool,
     pub blocks_movement: bool,
+    #[serde(default)]
+    pub linear_damping: Option<f64>,
+    #[serde(default)]
+    pub angular_damping: Option<f64>,
     pub generates_oxygen: bool,
+    #[serde(default = "air_available")]
+    pub allows_air_absorption: bool,
     /// 生成逻辑使用的配方标识。草地使用 `grass_matter`，其组成由后续生成系统解析。
     pub generated_matter_recipe: Option<String>,
     #[serde(default)]
     pub visual: TerrainVisual,
+}
+
+fn air_available() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
