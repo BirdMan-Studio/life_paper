@@ -114,6 +114,10 @@ pub struct ComponentCommand {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ComponentAction {
+    JetInPlace {
+        material: String,
+        rate_mg_per_tick: f64,
+    },
     Jet {
         material: String,
         rate_mg_per_tick: f64,
@@ -132,6 +136,10 @@ impl<'de> Deserialize<'de> for ComponentAction {
         #[derive(Deserialize)]
         #[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
         enum SavedAction {
+            JetInPlace {
+                material: String,
+                rate_mg_per_tick: f64,
+            },
             Jet {
                 material: String,
                 rate_mg_per_tick: f64,
@@ -147,6 +155,13 @@ impl<'de> Deserialize<'de> for ComponentAction {
             },
         }
         Ok(match SavedAction::deserialize(deserializer)? {
+            SavedAction::JetInPlace {
+                material,
+                rate_mg_per_tick,
+            } => Self::JetInPlace {
+                material,
+                rate_mg_per_tick,
+            },
             SavedAction::Jet {
                 material,
                 rate_mg_per_tick,

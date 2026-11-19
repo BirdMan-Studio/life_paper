@@ -187,6 +187,33 @@ impl WorldDirectory {
         Ok(world)
     }
 
+    pub fn create_tutorial_world(
+        &self,
+        user_id: i64,
+        tutorial_id: &str,
+        level_id: &str,
+        name: &str,
+    ) -> Result<Arc<WorldInstance>, WorldDirectoryError> {
+        let definition = crate::tutorial::find(tutorial_id).ok_or(WorldDirectoryError::InvalidLevelId)?;
+        let mut tutorial_world = crate::tutorial::build_map(&definition, &self.terrains).map_err(WorldDirectoryError::Generation)?;
+        tutorial_world.tutorial = Some(crate::tutorial::TutorialRuntime::new(definition));
+        self.import_tutorial_world(user_id, level_id, name, tutorial_world)
+    }
+
+    pub fn import_tutorial_world(&self, user_id: i64, level_id: &str, name: &str, tutorial_world: World) -> Result<Arc<WorldInstance>, WorldDirectoryError> {
+        let key = (user_id, level_id.to_owned());
+        let mut state = self.state.lock().expect("world directory lock poisoned");
+        if let Some(world_id) = state.tutorial_by_user_and_level.get(&key) {
+            if let Some(world) = state.worlds.get(world_id) { return Ok(Arc::clone(world)); }
+        }
+        let world = Self::create_world_locked(&mut state, &self.terrains, user_id, WorldKind::PlayerCreated, name, level_id, true)?;
+        *world.world.lock().expect("world runtime lock poisoned") = Some(Arc::new(tutorial_world));
+        let persisted = self.persist_created_world(&world);
+        drop(state);
+        if let Err(error) = persisted { self.remove_world(world.id); return Err(error); }
+        Ok(world)
+    }
+
     pub fn create_player_world(
         &self,
         user_id: i64,
@@ -283,6 +310,38 @@ impl WorldDirectory {
             .collect()
     }
 
+    pub fn list_all(&self) -> Vec<Arc<WorldInstance>> {
+        self.state
+            .lock()
+            .expect("world directory lock poisoned")
+            .worlds
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    pub fn admin_delete(&self, world_id: Uuid) -> std::io::Result<bool> {
+        let mut state = self.state.lock().expect("world directory lock poisoned");
+        let Some(world) = state.worlds.get(&world_id).cloned() else {
+            return Ok(false);
+        };
+        let mut runtime = world.world.lock().expect("world runtime lock poisoned");
+        if let Some(path) = self.snapshot_path(world_id) {
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        world.pause();
+        *runtime = None;
+        state.worlds.remove(&world_id);
+        state
+            .tutorial_by_user_and_level
+            .retain(|_, id| *id != world_id);
+        Ok(true)
+    }
+
     pub fn set_status(&self, world_id: Uuid, status: WorldStatus) -> Option<Arc<WorldInstance>> {
         let world = self.get(world_id)?;
         let mut runtime = world.world.lock().expect("world runtime lock poisoned");
@@ -368,6 +427,13 @@ impl WorldDirectory {
             Some(runtime) => runtime.as_ref().clone(),
             None => self.load_snapshot(world_id)?,
         };
+        if let Some(tutorial) = updated.tutorial.as_mut() {
+            let components = organism.composition.components.values().map(|part| part.component.as_str().to_owned()).collect();
+            tutorial.trigger("organism_created", &components);
+            if organism.component_states.values().any(|part| part.container.non_gas_contents_mg.values().any(|mass| *mass > 0.0) || part.container.gas_contents_ul.values().any(|volume| *volume > 0)) {
+                tutorial.trigger("container_changed", &components);
+            }
+        }
         updated.organisms.insert(organism.id, organism);
         // Persist before publishing so a failed write never creates a phantom instance.
         self.save_snapshot(&world, &updated)?;
@@ -463,6 +529,7 @@ impl WorldDirectory {
             );
         }
         updated.matter = matter;
+        crate::tutorial::observe_tick(snapshot, &mut updated);
         self.save_snapshot(&world, &updated)?;
         if runtime.is_some() {
             *runtime = Some(Arc::new(updated));
@@ -476,6 +543,11 @@ impl WorldDirectory {
         organism: &mut crate::domain::organism::OrganismInstance,
     ) -> Result<(), WorldDirectoryError> {
         let world = self.read_world(world_id, organism.owner_user_id)?;
+        if let Some(tutorial) = &world.tutorial {
+            if let Ok(position) = serde_json::from_value(tutorial.definition["map"]["spawn"].clone()) {
+                organism.position = position;
+            }
+        }
         crate::game::dynamics::place(organism, &world, &self.terrains);
         Ok(())
     }
@@ -1066,6 +1138,80 @@ mod tests {
         assert!(directory.commit_tick(world.id, &after, vec![]).is_err());
         assert_eq!(world.world().unwrap().as_ref(), after.as_ref());
         fs::remove_file(storage).unwrap();
+    }
+
+    #[test]
+    fn ejecta_motion_commits_with_inventory_survives_restart_and_rolls_back_on_save_error() {
+        let storage = std::env::temp_dir().join(format!("life-paper-ejecta-{}", Uuid::new_v4()));
+        let terrains = Arc::new(create_default_terrain_registry().unwrap());
+        let directory = WorldDirectory::new_with_storage(terrains.clone(), &storage).unwrap();
+        let world = directory
+            .create_player_world(7, "ejecta", "ejecta")
+            .unwrap();
+        let registry = crate::domain::create_default_component_registry().unwrap();
+        let mut model =
+            crate::domain::BiologicalOrganism::new(crate::domain::OrganismProgramId::new());
+        let root = model.add_component("small_body_1", &registry).unwrap();
+        let jet = model.add_component("jet_organ_1", &registry).unwrap();
+        model.connect(root, jet, &registry).unwrap();
+        let mut organism = crate::domain::organism::OrganismInstance::from_model(
+            model.id,
+            7,
+            "ejecta".into(),
+            model,
+            &registry,
+        )
+        .unwrap();
+        let water = crate::domain::element::ElementId::new("water").unwrap();
+        organism
+            .component_states
+            .get_mut(&root)
+            .unwrap()
+            .container
+            .non_gas_contents_mg
+            .insert(water.clone(), 20.0);
+        organism
+            .ai
+            .pending_commands
+            .push(crate::domain::organism_component::ComponentCommand {
+                component_id: jet,
+                action: crate::domain::organism_component::ComponentAction::Jet {
+                    material: "water".into(),
+                    rate_mg_per_tick: 20.0,
+                    angle_deg: 0.0,
+                },
+            });
+        let organism_id = organism.id;
+        directory.add_organism(world.id, organism).unwrap();
+        directory.set_status(world.id, WorldStatus::Active).unwrap();
+        assert!(
+            directory
+                .commit_tick(world.id, &world.world().unwrap(), vec![])
+                .unwrap()
+        );
+        let launch = world.world().unwrap();
+        assert_eq!(launch.matter.ejecta.len(), 1);
+        assert_eq!(launch.matter.ejecta[0].amounts_mg[&water], 20.0);
+        assert!(
+            launch.organisms[&organism_id].component_states[&root]
+                .container
+                .non_gas_contents_mg
+                .is_empty()
+        );
+        assert!(directory.commit_tick(world.id, &launch, vec![]).unwrap());
+        let moved = world.world().unwrap();
+        assert_ne!(moved.matter.ejecta[0].x, launch.matter.ejecta[0].x);
+        assert_eq!(moved.matter.ejecta[0].amounts_mg[&water], 18.0);
+        let restarted = WorldDirectory::new_with_storage(terrains, &storage).unwrap();
+        assert_eq!(
+            restarted.read_world(world.id, 7).unwrap().as_ref(),
+            moved.as_ref()
+        );
+        fs::remove_dir_all(&storage).unwrap();
+        fs::write(&storage, b"blocked").unwrap();
+        assert!(directory.commit_tick(world.id, &moved, vec![]).is_err());
+        assert_eq!(world.world().unwrap().as_ref(), moved.as_ref());
+        fs::remove_file(&storage).unwrap();
     }
 
     #[test]

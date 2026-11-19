@@ -29,7 +29,7 @@ function saveServer() {
   const value = serverUrl.value.trim().replace(/\/$/, '')
   try {
     const url = new URL(value)
-    if (!['http:', 'https:'].includes(url.protocol)) throw new Error()
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error()
   } catch {
     serverError.value = t('settings.invalidServerUrl')
     return
@@ -81,3 +81,10 @@ function saveServer() {
     </div>
   </section>
 </template>
+
+<style scoped>
+.create-modal.connection-modal{width:min(460px,calc(100vw - 32px));max-height:85vh;overflow:auto;min-width:0}
+.connection-modal input{width:100%;min-width:0}
+.connection-modal .modal-title h3{font-size:20px;letter-spacing:0}
+@media(max-width:600px){.create-modal.connection-modal{padding:20px}.connection-modal .modal-actions{flex-wrap:wrap}}
+</style>

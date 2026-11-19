@@ -189,7 +189,9 @@ async fn delete_account(
 
     // Only remove in-memory and on-disk worlds after the account deletion
     // succeeds, so a database failure cannot destroy user data.
-    state.worlds.remove_for_user(session.user_id);
+    if !state.central_only {
+        state.worlds.remove_for_user(session.user_id);
+    }
     for model_id in model_ids {
         let folder = state.organism_model_storage.join(model_id.to_string());
         if let Err(error) = tokio::fs::remove_dir_all(folder).await
@@ -226,7 +228,7 @@ fn validate_registration(request: &RegisterRequest) -> Result<(), ApiError> {
     Ok(())
 }
 
-async fn hash_password(password: String) -> Result<String, ApiError> {
+pub(crate) async fn hash_password(password: String) -> Result<String, ApiError> {
     tokio::task::spawn_blocking(move || {
         let salt = SaltString::generate(&mut OsRng);
         Argon2::default()
@@ -350,7 +352,7 @@ async fn delete_session(state: &AppState, user_id: i64, token: &str) -> Result<(
         })
 }
 
-async fn revoke_all_sessions(state: &AppState, user_id: i64) -> Result<(), ApiError> {
+pub(crate) async fn revoke_all_sessions(state: &AppState, user_id: i64) -> Result<(), ApiError> {
     const REVOKE_ALL_SCRIPT: &str = r#"
         local session_keys = redis.call('SMEMBERS', KEYS[1])
         for _, session_key in ipairs(session_keys) do

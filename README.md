@@ -55,6 +55,8 @@ life_paper/
 
 ## 快速开始
 
+服务端支持一体部署，以及独立的 `central-server`（账号、资产、模型）和 `game-server`（世界模拟、实例、AI、存档）。独立游戏服运行时无需 PostgreSQL 或 Redis，并提供后续单人模式所需的本地身份入口。双地址客户端配置、签名票据、模型包与迁移方法见 [拆分部署说明](common/deployment.md)。下方快速开始保留原有一体部署方式。
+
 ### 启动顺序
 
 项目运行需要 PostgreSQL、Redis、Rust 和 Node.js。开发时建议按下面的顺序启动：
@@ -226,3 +228,4 @@ http://127.0.0.1:8080/api/v1
 当前 v1 API 设计与已实现接口见：
 
 - [Life Paper API 文档](common/api.md)
+- [管理后台与日志](common/admin.md)

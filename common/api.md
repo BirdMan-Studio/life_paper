@@ -171,6 +171,59 @@
 }
 ```
 
+### 获取教程目录
+
+`GET /tutorials`
+
+返回由鉴权服务端分发的教程节点。客户端据此展示横向教程科技树，并结合磁盘存档展示解锁进度；查看列表不会启动本地引擎。目录缓存在桌面应用磁盘上，连接失败时可回退到缓存。
+
+```json
+{
+  "data": [
+    {
+      "id": "welcome",
+      "title": "生命起点",
+      "description": "认识世界",
+      "order": 10,
+      "prerequisites": [],
+      "map": { "level_id": "tutorial_welcome", "size_px": 1200, "water_radius_px": 80, "seed": 101, "spawn": { "x": 600, "y": 600 } },
+      "events": [{ "id": "start", "trigger": "world_enter", "once": true, "ui": "on_start" }],
+      "ui": { "on_start": { "panel": "tutorial" } }
+    }
+  ]
+}
+```
+
+### 下载教程包
+
+`GET /tutorials/{tutorial_id}/package`
+
+向鉴权服请求，需要中心账号会话。返回 `data.version: 1`、`data.definition`（节点定义、事件、UI、`models` 示例生物包）及 `data.world`（完整初始地图，包括地形层和地基参数）。仅传输内容，不在鉴权服或远程游戏服创建玩家世界。
+
+### 导入本地教程世界
+
+`POST /worlds/tutorial/import`
+
+向桌面客户端启动的本地游戏服发送下载得到的完整包，需要本地引擎令牌。只允许 `auth.mode = "local"`；联机游戏服拒绝导入。校验版本、节点、地图参数和本地前置关卡进度后，保存初始地图、事件、UI、示例模型并创建本地世界；相同玩家和关卡重复导入返回已有世界，保留原进度。不会采用包内携带的通关状态。
+
+首次点击教程节点才下载和导入，再次进入只加载本地存档。教程运行、脚本执行、事件判定和 UI 状态均请求本地引擎，不申请游戏服连接票据、不使用中心中继，进度不回写中心。
+
+### 兼容旧版联机教程创建
+
+`POST /worlds/tutorial/{tutorial_id}`
+
+保留旧版接口兼容已有调用，使用游戏服编译时内置定义。当前客户端教程入口使用下载包和本地导入流程，不调用此接口。
+
+成功响应为标准世界摘要，包含 `id`、`name`、`owner_user_id`、`level_id` 和 `status`。
+
+内置教程使用服务端模板生成带围墙的地形：出生点保留安全草地，附近分布岩地、湿地及不规则水岸，水域分为浅水、池塘和深水；外围保留种子驱动的地基地形变化。地图尺寸、水域半径、地基种子和出生位置随目录定义，同一模板和种子生成结果一致。新布局仅用于新建世界，已有存档保留原地形。`events` 的 `ui` 引用同一节点 `ui` 对象中的面板名；`requires` 指定先发生的事件 ID，`condition.component` 可限制生物组件，`complete: true` 标记通关。当前触发器包括 `world_enter`、`organism_created`、`container_changed`、`jet_used`、`ejecta_settled`，全部由游戏服根据真实操作触发，每个事件只记录一次。事件定义和进度一起存档，旧教程世界保留创建时的定义。尚未通关同一游戏服上的前置教程时，创建返回 `409`。
+
+### 获取教程运行状态
+
+`GET /worlds/{world_id}/tutorial`
+
+仅允许世界所有者访问，普通世界返回 `404`。返回 `data.id`、`completed`、`fired_events`、已触发的 `panels` 和教程包内的 `models`。客户端展示面板中的 `title`、`message`、`steps`，不执行 UI 中的脚本或 HTML；示例生物代码通过本地游戏服的现有Python运行器执行。教程进度从本地世界存档恢复，刚通关时当前客户端立即更新科技树。
+
 ### 获取或创建新手世界
 
 `POST /worlds/tutorial`
@@ -515,10 +568,18 @@
 `POST /api/v1/worlds/{world_id}/organisms`，需要 Bearer 登录凭证。
 
 ```json
-{ "model_id": "模型 UUID" }
+{
+  "model_id": "模型 UUID",
+  "initial_contents": {
+    "模型内组件 UUID": {
+      "non_gas_contents_mg": { "monosaccharide": 500.5 },
+      "gas_contents_ul": { "oxygen": 10000 }
+    }
+  }
+}
 ```
 
-成功返回 `201 Created`，响应为 `{ "data": OrganismInstance }`。只能向自己的世界放置自己的模型。世界不存在返回 404，无世界权限返回 403，模型不存在或不属于当前用户返回 404。暂不接受坐标、方向、耐久或容器内容等客户端覆盖参数。
+成功返回 `201 Created`，响应为 `{ "data": OrganismInstance }`。只能向自己的世界放置自己的模型。世界不存在返回 404，无世界权限返回 403，模型不存在或不属于当前用户返回 404。`initial_contents` 可省略，按模型内组件 UUID 指定各容器的初始物资；两个内容映射也可省略。物质必须为已注册 ID，非气体为有限非负毫克数，气体为非负整数微升数，各类总量分别不得超过组件容量。未知组件、未知物质、负数或超容量请求返回 400，不创建实例。不接受坐标、方向、耐久或完整组件状态覆盖参数。
 
 实例包含：
 
@@ -541,7 +602,7 @@
 }
 ```
 
-非气体以毫克计，气体以微升计，内含物质按元素注册 ID 保存；新实例容器为空。小型躯体初始耐久 100，容量 2g / 20mL；反应结构增加自身 20g 容器，气室结构提供自身 40mL 容器。已有实例保留属性快照，不自动扩容。`properties` 还包含最大耐久、损坏/修复权重、质量、储能上限、容量、反应速率上下限和传感器槽位。设计中未指定的质量为 `null`。组件目录接口也下发这些可配置属性。
+非气体以毫克计，气体以微升计，内含物质按元素注册 ID 保存；新实例容器默认为空，可通过 `initial_contents` 填充。小型躯体初始耐久 100，容量 2g / 20mL；反应结构增加自身 20g 容器，气室结构提供自身 40mL 容器。已有实例保留属性快照，不自动扩容。`properties` 还包含最大耐久、损坏/修复权重、质量、储能上限、容量、反应速率上下限和传感器槽位。设计中未指定的质量为 `null`。组件目录接口也下发这些可配置属性。
 
 `non_gas_contents_mg` 当前支持浮点mg，以保存范围吸收的混合物比例和微量余数；旧存档的整数值兼容。世界新增可选 `matter` 存档字段，保存逻辑tick及圆形吸收/补入记录；旧世界缺少时以满默认营养初始化。AI `get_tile` 返回 `matter_mg` 映射，各项为该格当前剩余质量。草地恢复、衰减和记录字段见[世界物质设计](matter.md)。
 
@@ -634,6 +695,8 @@ Python SDK、可见范围、配置与运行限制详见 [AI 接口说明](ai.md)
 
 ### 世界物质交换
 
+喷射器官也提供 `part.jet_in_place(material, rate)`，原地排出而不产生推力或转矩。对应控制为 `{ "method": "jet_in_place", "material": "water", "rate_mg_per_tick": 100 }`，不接受 `angle_deg`。扣料、速率档位、质量/体积限制、耐久和能耗同普通喷射；固液物质团在喷口位置以零速度生成，随后扩散流失，气体散入环境。该接口不清除生物已有惯性；同一器官的两种喷射控制以最后一次调用为准。
+
 以下接口需要登录且拥有世界，结果包装为 `{ "data": ... }`。
 
 - `GET /api/v1/worlds/{world_id}/matter?x=0&y=0&radius_px=5[&since=123]`：首次返回附近活动记录，携带since时只返回新增/有效期更新的活动记录。响应含 `tick`、`cursor`、`reset`、查询区域、恢复/流失参数和 `records`。半径0～64px；since不能超过当前历史条数。
@@ -641,11 +704,39 @@ Python SDK、可见范围、配置与运行限制详见 [AI 接口说明](ai.md)
 
 记录使用世界tick，带生物/器官来源、交换实际量、圆形范围、过时tick。`sequence` 是稳定的世界内记录序号，`updated_at_sequence` 是最后一次修改有效期时的历史游标。客户端增量按sequence覆盖，按tick过时；更换查询范围须重新取不带since的快照。同期有效期变化也会随增量返回，不能只按新记录序号追加。完整语义与存储限制见[世界物质设计](matter.md)。
 
+### 独立游戏服接入
+
+中心管理后台、独立管理员鉴权及 `/admin`、游戏服 `/management` 接口见[管理后台与日志](admin.md)。
+
+一体模式原接口保持兼容。中心服务新增 `GET /api/v1/auth/game-public-key`，返回 `{ "data": { "algorithm": "Ed25519", "public_key": "base64url公钥" } }`。公钥须由游戏服管理员从可信来源取得并固定。
+
+游戏服必须先在管理后台登记并领取中心生成的独立接入密钥。`POST /api/v1/game-servers/register` 使用该密钥作为Bearer凭证，正文为 `{ "server_id": "game-1", "api_url": "https://game.example.com/api/v1", "worlds": [{ "id": "世界UUID", "owner_user_id": 7, "name": "世界名" }] }`。中心核对密钥、ID及登记地址，返回 `{ "data": { "receipt": "中心签名回执", "lease_seconds": 90, "server_id": "game-1" } }`。回执用途为 `game-registration`，由游戏服固定的中心公钥验证。游戏服每30秒使用同一接口续约；中心重启、密钥重置或地址修改后需重新注册。
+
+`GET /api/v1/game-servers` 需玩家中心会话，仅返回已验证在线游戏服及当前玩家的世界目录，含 `id/name/api_url/online/last_seen/key_configured/worlds`。不返回接入密钥或摘要。
+
+响应顶层含 `deployment_mode: "central" | "combined"`。客户端大厅仅读取此目录；进入世界后再获取连接票据，加载地图、世界状态和生物。世界目录心跳不包含实时运行状态，因此进入后向所属游戏服读取状态，不在大厅预加载地图或生物。
+
+`POST /api/v1/auth/game-ticket` 需中心会话，正文 `{ "game_server_id": "game-1" }`，返回 `{ "data": { "token": "签名票据", "expires_in": 900, "game_server_id": "game-1", "api_url": "已登记的游戏服地址" } }`。未登记返回404，未验证或心跳过期返回409。`GET /api/v1/game-servers/{id}/connection` 提供相同连接信息；`GET /api/v1/game-worlds/{world_id}/connection` 根据心跳目录核对玩家归属后返回该世界所在游戏服的地址和玩家票据，找不到当前玩家世界返回404，多服重复世界ID返回409。
+
+`POST /api/v1/organism-models/{model_id}/export` 同样需中心会话和相同正文，目标游戏服须已验证在线，返回 `{ "data": { "model_bundle": "签名模型包", "expires_in": 900 } }`；只允许导出自己的模型。以上三个用途与管理票据相互隔离，游戏服接入密钥不发送给玩家。
+
+独立游戏服提供 `GET /api/v1/game-server`，返回 `{ "data": { "server_id": "game-1", "auth_mode": "central", "protocol_version": 1 } }`。后续 `/worlds/...` 请求使用游戏票据作为 Bearer 凭证。创建实例额外携带 `model_bundle` 字符串；不接受中心会话令牌或无签名模型覆盖。
+
+回环地址限定的本地模式使用配置的本地Bearer令牌，创建实例时提供 `local_model`（`id/name/composition/files` 和可选 `directories`），玩家ID固定为1，不需要中心。部署、模型包大小、签名有效期和撤销限制见[拆分部署说明](deployment.md)。
+
+### 中心中继
+
+游戏服目录、玩家连接信息、玩家票据新增 `direct_url`（与 `api_url` 相同）和 `relay_url`（`/api/v1/relay/{server_id}`）。管理员游戏服票据也返回 `relay_url`。
+
+`/api/v1/relay/{server_id}/{path}` 支持 GET、HEAD、POST、PUT、PATCH、DELETE，保留查询参数、正文、Content-Type和上游状态码。Bearer必须为该游戏服的有效签名票据：`worlds`、`worlds/...`、`game-server`、`python-api` 使用 `game-entry`；`management/logs`、`management/worlds` 及其子路径使用 `game-admin`。禁止转发其他命名空间及越界路径；仅允许中心登记且当前在线的游戏服。响应携带 `x-life-paper-transport: relay`，不缓存。账号令牌、管理员令牌及接入密钥均不能用作中继凭证。
+
+请求体上限100 MiB、响应128 MiB、并发8、上游超时30秒。不可达返回502，超时504，繁忙503，请求体超限413。客户端只自动重试读请求，写请求连接中断须先查询确认结果再决定是否重试。部署边界见 [拆分部署说明](deployment.md)。
+
 ### Python API 文档
 
 `GET /api/v1/python-api` 无需登录，返回 `{ "data": { "version": 2, "title": "Python API", "sections": [...], "components": [...], "substances": [...] } }`。接口条目包含签名、可用状态、参数、返回值、执行规则和示例；物质与组件目录来自当前服务器注册表。客户端侧栏「API 文档」加载此接口，提供搜索、分类、复制示例和刷新。
 
-喷射使用 `part.jet(material, rate, angle=0)`，`angle_deg` 范围 -5°～5°，精细度10，每档1°，取最近整数度，半档远离零，正值顺时针。缺少角度的旧调用与存档默认0°。执行时从连接身体扣料，质量/体积限制同时生效，按实际扣除质量产生推力；空仓无推力。固液排入喷口所在格，气体散入环境。
+喷射使用 `part.jet(material, rate, angle=0)`，`angle_deg` 范围 -5°～5°，精细度10，每档1°，取最近整数度，半档远离零，正值顺时针。缺少角度的旧调用与存档默认0°。执行时从连接身体扣料，质量/体积限制同时生效，按实际扣除质量产生推力；空仓无推力。固液生成带惯性、阻尼、扩散和质量流失的独立物质团，气体散入环境。区域物质接口额外返回 `ejecta` 完整快照，携带since时也须整体替换该列表；历史喷射记录不作为静态补入重放。`get_tile().matter_mg` 与范围吸收均包含物质团，参数和数据字段见[物质设计](matter.md)。
 
 ### 杀死生物实例
 

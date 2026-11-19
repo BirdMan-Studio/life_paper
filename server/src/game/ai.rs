@@ -123,7 +123,7 @@ impl AiContext {
             .clone()
             .unwrap_or_else(|| builtin_component_api(part.component.as_str()));
         let spec = match request.method.as_str() {
-            "jet" => api.jet.as_ref(),
+            "jet" | "jet_in_place" => api.jet.as_ref(),
             "absorb_air" | "absorb_matter" => api.absorption.as_ref(),
             _ => None,
         }
@@ -167,17 +167,24 @@ impl AiContext {
             ));
         }
         let action = match request.method.as_str() {
-            "jet" => {
+            "jet" | "jet_in_place" => {
                 let material = request
                     .material
                     .filter(|id| self.elements.contains(id))
                     .ok_or_else(|| {
                         error("BAD_REQUEST", "material must be a registered substance ID")
                     })?;
-                ComponentAction::Jet {
-                    material,
-                    rate_mg_per_tick,
-                    angle_deg,
+                if request.method == "jet_in_place" {
+                    ComponentAction::JetInPlace {
+                        material,
+                        rate_mg_per_tick,
+                    }
+                } else {
+                    ComponentAction::Jet {
+                        material,
+                        rate_mg_per_tick,
+                        angle_deg,
+                    }
                 }
             }
             _ if request.material.is_some() => {
@@ -1064,6 +1071,35 @@ mod tests {
         let output = f.execute("def main(game):\n    pass\n", 5000, 256).await;
         assert!(f.commit(2, output));
         assert!(f.context().organism.ai.pending_commands.is_empty());
+    }
+
+    #[tokio::test]
+    async fn python_in_place_jet_validates_and_overwrites_normal_jet() {
+        use crate::domain::organism_component::ComponentAction;
+        let f = Fixture::with_components(true, false, &["jet_organ_1"]);
+        let output = f.execute("def main(game):\n    jet = next(p for p in game.me.components.values() if p.component == 'jet_organ_1')\n    assert not hasattr(next(p for p in game.me.components.values() if p.component == 'small_body_1'), 'jet_in_place')\n    for material, rate in [('unknown', 20), ('water', -1), ('water', 201), ('water', True), ('water', float('nan')), (None, 20)]:\n        try:\n            jet.jet_in_place(material, rate)\n        except (TypeError, ValueError):\n            pass\n        else:\n            raise AssertionError('invalid discharge accepted')\n    jet.jet('water', 200)\n    assert jet.jet_in_place('water', 31) == 31\n", 5000, 256).await;
+        assert!(output.report.ok, "{:?}", output.report);
+        assert_eq!(output.report.commands.len(), 1);
+        assert!(
+            matches!(&output.report.commands[0].action, ComponentAction::JetInPlace { material, rate_mg_per_tick: 31.0 } if material == "water")
+        );
+        let saved = serde_json::to_value(&output.report.commands).unwrap();
+        let restored: Vec<crate::domain::organism_component::ComponentCommand> =
+            serde_json::from_value(saved).unwrap();
+        assert_eq!(restored, output.report.commands);
+        let context = f.context();
+        let id = output.report.commands[0].component_id;
+        assert!(context.component_command(&json!({"component_id": id, "method": "jet_in_place", "material": "water", "rate_mg_per_tick": 20, "angle_deg": 0})).is_err());
+        let output = f.execute("def main(game):\n    jet = next(p for p in game.me.components.values() if p.component == 'jet_organ_1')\n    jet.jet_in_place('water', 100)\n    jet.jet('water', 0)\n", 5000, 256).await;
+        assert!(output.report.ok, "{:?}", output.report);
+        assert_eq!(output.report.commands.len(), 1);
+        assert!(matches!(
+            output.report.commands[0].action,
+            ComponentAction::Jet {
+                rate_mg_per_tick: 0.0,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

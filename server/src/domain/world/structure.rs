@@ -183,6 +183,8 @@ pub struct TerrainLayer {
 /// 未被任何区域覆盖的坐标使用 `default_terrain`。区域按写入顺序覆盖，后写入者优先。
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct World {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tutorial: Option<crate::tutorial::TutorialRuntime>,
     #[serde(default)]
     pub matter: super::WorldMatter,
     #[serde(default)]
@@ -199,6 +201,7 @@ pub struct World {
 impl World {
     pub(crate) fn new(default_terrain: TerrainId, terrain_layers: Vec<TerrainLayer>) -> Self {
         Self {
+            tutorial: None,
             matter: Default::default(),
             ai_full_visibility: false,
             default_terrain,

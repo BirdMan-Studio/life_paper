@@ -36,16 +36,16 @@ pub fn create_default_terrain_registry() -> Result<TerrainRegistry, TerrainRegis
     registry.register("swamp", "沼泽", true, false, true, None)?;
     registry.register("wetland", "湿地", true, false, true, None)?;
 
-    visual(&mut registry, "wasteland", "#4c5560", "dust");
-    visual(&mut registry, "grassland", "#6fa85b", "grass");
-    visual(&mut registry, "shallow_water", "#3f91a6", "ripples");
-    visual(&mut registry, "pond", "#4e9fb0", "ripples");
-    visual(&mut registry, "deep_water", "#24516d", "waves");
-    visual(&mut registry, "wall", "#7b8791", "blocks");
-    visual(&mut registry, "cliff", "#6f5d52", "rock");
-    visual(&mut registry, "valley", "#769b7c", "mist");
-    visual(&mut registry, "swamp", "#627f62", "mud");
-    visual(&mut registry, "wetland", "#7fa866", "reeds");
+    visual(&mut registry, "wasteland", "#67736c", "dust");
+    visual(&mut registry, "grassland", "#82965e", "grass");
+    visual(&mut registry, "shallow_water", "#71afa5", "ripples");
+    visual(&mut registry, "pond", "#4a909a", "ripples");
+    visual(&mut registry, "deep_water", "#336d86", "waves");
+    visual(&mut registry, "wall", "#8b9492", "blocks");
+    visual(&mut registry, "cliff", "#838780", "rock");
+    visual(&mut registry, "valley", "#a1a582", "mist");
+    visual(&mut registry, "swamp", "#64867b", "mud");
+    visual(&mut registry, "wetland", "#719b79", "reeds");
 
     Ok(registry)
 }

@@ -49,7 +49,7 @@ const palette = ['#654321', '#0088ff', '#999900', '#005533', '#008000', '#00ffff
       await page.waitForTimeout(100);
       if (burstFrame != null) assert.equal(await page.evaluate(() => window.terrainFrames), burstFrame + 1, 'A burst of wheel events must draw only once');
       assert.deepEqual(errors, []);
-      const png = PNG.sync.read(await canvas.screenshot({ path: `terrain-${zoom}.png` }));
+      const png = PNG.sync.read(await canvas.screenshot({ style: '.map-navigation, .map-scale { visibility: hidden !important; }' }));
       const expectedPixels = await page.evaluate(async zoom => {
         const { createTerrainSampler } = await import('/src/rendering/terrain.js');
         const sample = createTerrainSampler(window.testGround.value);

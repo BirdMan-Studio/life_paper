@@ -10,6 +10,9 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct AppState {
+    pub admin: Arc<crate::administration::AdminService>,
+    pub signing_key: Arc<ring::signature::Ed25519KeyPair>,
+    pub central_only: bool,
     pub ai_runtime: Arc<crate::game::ai::AiRuntime>,
     pub users: UserRepository,
     pub component_unlocks: ComponentUnlockRepository,

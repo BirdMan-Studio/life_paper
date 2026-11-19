@@ -1,4 +1,4 @@
-use crate::state::AppState;
+use crate::game_state::GameState as AppState;
 use axum::{Json, extract::State};
 use serde_json::{Value, json};
 
@@ -18,10 +18,11 @@ fn document(
                 {"signature":"def main(game)", "status":"available", "description":"每 tick 调用一次同步入口，返回值忽略。状态为调用开始时的只读快照，控制在 tick 统一结算。", "returns":"None", "parameters":[], "notes":["同一组件只保留最后一条控制，吸气与吸物质互相覆盖。","调用失败保留上次成功控制；成功无输出则清空控制。","实际执行量受耐久、能量、库存和容器限制；方法返回原始请求速率。"], "example":"def main(game):\n    game.log(game.me.name, game.me.position.x, game.me.position.y)"}
             ]},
             {"id":"controls", "title":"器官控制", "entries":[
-                {"signature":"part.jet(material, rate, angle=0)","status":"available","description":"喷射器官 I：扣除连接身体内的指定物质，按实际喷出质量产生反向推力和偏心转矩。","returns":"请求的 rate（mg/tick）","parameters":[["material","str","已注册物质 ID"],["rate","number","0～200 mg/tick，执行向下取整，每档 20 mg"],["angle","number","相对喷射朝向 -5～5 度，10 段，每档 1 度，四舍五入，正值顺时针"]],"notes":["库存不足自动减量；空仓不产生推力。只从连接身体取料，不自动跨组件运输。","同种物质若气仓和非气仓均有，先使用气仓。气体按独立参考体积密度换算，整微升扣除，受 2 mL/tick 上限约束。","固液暂按 1.5 g/mL 游戏密度换算，喷出物加入器官所在格汤层；气体散入环境，不增加世界气体库存。","基础能耗 5 mJ/tick，可变最高 10 mJ/tick。能量不足及耐久下降同比减少实际物质消耗与推力。"],"example":"def main(game):\n    for part in game.me.components.values():\n        if part.component == 'jet_organ_1':\n            part.jet('water', 100, angle=3)"},
+                {"signature":"part.jet(material, rate, angle=0)","status":"available","description":"喷射器官 I：扣除连接身体内的指定物质，按实际喷出质量产生反向推力和偏心转矩。","returns":"请求的 rate（mg/tick）","parameters":[["material","str","已注册物质 ID"],["rate","number","0～200 mg/tick，执行向下取整，每档 20 mg"],["angle","number","相对喷射朝向 -5～5 度，10 段，每档 1 度，四舍五入，正值顺时针"]],"notes":["库存不足自动减量；空仓不产生推力。只从连接身体取料，不自动跨组件运输。","同种物质若气仓和非气仓均有，先使用气仓。气体按独立参考体积密度换算，整微升扣除，受 2 mL/tick 上限约束。","固液暂按 1.5 g/mL 游戏密度换算，生成继承喷口速度并沿喷出方向运动的物质团；阻尼减速、扩散并流失质量直至清除，可被范围吸收。气体散入环境，不增加世界气体库存。","基础能耗 5 mJ/tick，可变最高 10 mJ/tick。能量不足及耐久下降同比减少实际物质消耗与推力。"],"example":"def main(game):\n    for part in game.me.components.values():\n        if part.component == 'jet_organ_1':\n            part.jet('water', 100, angle=3)"},
                 {"signature":"part.absorb_air(rate)","status":"available","description":"吸收器官 I：吸入 21% 氧气、79% 氮气，存入连接身体气仓，不扣世界库存。","returns":"请求的 rate（mL/tick）","parameters":[["rate","number","0～5 mL/tick，执行向下取整，每档 0.5 mL"]],"notes":["按器官坐标判断地层；深水、墙、悬崖禁用。","受 50 mg/tick、5 mL/tick、耐久、能量和剩余容量限制。基础 3 mJ，可变最高 5 mJ。"],"example":"absorber.absorb_air(5)"},
                 {"signature":"part.absorb_matter(rate)","status":"available","description":"吸收器官 I：以器官为圆心、半径 5 px，按范围平均组成吸入并扣除世界库存。","returns":"请求的 rate（mg/tick）","parameters":[["rate","number","0～50 mg/tick，执行向下取整，每档 5 mg"]],"notes":["以范围总库存为可吸上限，按各格剩余量同比扣除。","写入连接身体非气体容器，保留小数 mg；受耐久、能量、剩余容量及 1 mL/tick 上限约束。"],"example":"absorber.absorb_matter(50)"},
-                {"signature":"part.get_vision(angles=None)","status":"planned","description":"感光器官接口预留，当前调用抛出 NotImplementedError。","returns":"尚未实现","parameters":[["angles","list | None","1～120 个 -30～30 度相对角度"]],"notes":[],"example":"# 尚未开放"}
+                {"signature":"part.get_vision(angles=None)","status":"planned","description":"感光器官接口预留，当前调用抛出 NotImplementedError。","returns":"尚未实现","parameters":[["angles","list | None","1～120 个 -30～30 度相对角度"]],"notes":[],"example":"# 尚未开放"},
+                {"signature":"part.jet_in_place(material, rate)","status":"available","description":"喷射器官原地排出物质，不产生推力或转矩。","returns":"请求的 rate（mg/tick）","parameters":[["material","str","已注册物质 ID"],["rate","number","0～200 mg/tick，执行向下取整，每档 20 mg"]],"notes":["沿用 jet 的库存、质量与体积上限、耐久和能耗规则；不接受 angle。","固液在喷口位置生成零初速度物质团，不继承生物平移或旋转速度，继续扩散和流失；气体散入环境并记录排放。","不会清除生物已有惯性；同一器官与 jet 互相覆盖，以最后一条控制为准。"],"example":"jet.jet_in_place('water', 100)"}
             ]},
             {"id":"self", "title":"自身与容器", "entries":[
                 {"signature":"game.me","status":"available","description":"当前实例只读信息。","returns":"只读对象","parameters":[],"notes":["id、model_id、name、position.x/y、rotation（度）、rotation_mdeg、composition。","motion 可为 None，否则包含 x、y、angle_rad、velocity_x/y 和 angular_velocity。","components 为组件 UUID 到组件对象的映射。组件可读 component、placement、durability、energy_mj、properties、api、container。","容器 non_gas_contents_mg 保存各物质质量（mg）；gas_contents_ul 保存气体体积（微升）。不能直接修改快照。"],"example":"for part in game.me.components.values():\n    game.log(part.component, part.container.non_gas_contents_mg)"}
@@ -55,5 +56,9 @@ mod tests {
             "part.jet(material, rate, angle=0)"
         );
         assert_eq!(value["sections"][1]["entries"][3]["status"], "planned");
+        assert_eq!(
+            value["sections"][1]["entries"][4]["signature"],
+            "part.jet_in_place(material, rate)"
+        );
     }
 }

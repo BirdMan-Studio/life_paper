@@ -1,0 +1,131 @@
+const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
+const assert = require('node:assert/strict');
+
+(async () => {
+  const browser = await chromium.launch({ channel: 'msedge', headless: true });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+    const errors = [], writes = [];
+    page.on('pageerror', e => errors.push(e.message));
+    const users = [{ id: '9007199254740993', username: 'River', email: 'river@example.test', energy_coins: '12000', gold_coins: '450', bio_soup: { water: '200' }, unlocked_components: ['small_body_1'] }];
+    const servers = [{ id: 'game-1', name: '华东实验服', api_url: 'https://game.test/api/v1', online: true, key_configured: true }];
+    const components = [{ id: 'small_body_1', name: '小型身体', category: 'body' }];
+    const elements = [{ id: 'water', name: '水', category: 'liquid' }];
+    const models = [{ id: 'model-1', name: '测试模型', owner_user_id: '7', composition: { components: {} }, updated_at: new Date().toISOString() }];
+    const worlds = [{ id: 'world-1', name: '营养循环实验', owner_user_id: '7', level_id: 'basic', status: 'active' }];
+    const logs = [{ id: 12, time: new Date().toISOString(), level: 'WARN', category: 'runtime', target: 'game::ai', fields: { message: 'Python worker timeout', world_id: 'sandbox-1' } }, { id: 11, time: new Date().toISOString(), level: 'INFO', category: 'network', target: 'http', fields: { method: 'GET', path: '/api/v1/worlds', status: 200, duration_ms: 4, request_id: 'req-11' } }];
+    await page.route('https://central.test/api/v1/**', async route => {
+      const req = route.request(), url = new URL(req.url()), path = url.pathname;
+      if (path.includes('/relay/game-1/management/')) {
+        assert.equal(req.headers().authorization, 'Bearer signed-management-ticket');
+        if (req.method() !== 'GET') writes.push({ path: path.replace('/relay/game-1', ''), method: req.method(), body: req.postData() ? req.postDataJSON() : null });
+        if (req.method() === 'PATCH') { worlds[0].status = req.postDataJSON().status; return route.fulfill({ status: 204 }); }
+        if (req.method() === 'DELETE') { worlds.splice(0); return route.fulfill({ status: 204 }); }
+        return route.fulfill({ json: { data: path.endsWith('/logs') ? { records: logs, next_before: 11 } : worlds } });
+      }
+      assert.equal(req.headers().authorization, 'Bearer admin-test-secret');
+      if (req.method() !== 'GET') writes.push({ path, method: req.method(), body: req.postData() ? req.postDataJSON() : null });
+      if (req.method() === 'DELETE') {
+        if (path.includes('/records/users/')) users.splice(0);
+        if (path.includes('/records/models/')) models.splice(0);
+        return route.fulfill({ status: 204 });
+      }
+      let data = {};
+      if (path.endsWith('/session')) data = { role: 'administrator' };
+      else if (path.endsWith('/catalog')) data = { components, elements };
+      else if (path.endsWith('/registration-key')) data = { registration_key: 'generated-server-key-012345678901234567890123' };
+      else if (path.endsWith('/ticket')) data = { token: 'signed-management-ticket', api_url: servers[0].api_url, expires_in: 900, relay_url: '/api/v1/relay/game-1' };
+      else if (path.endsWith('/servers')) data = req.method() === 'POST' ? { saved:true,registration_key:'generated-server-key-012345678901234567890123' } : servers;
+      else if (path.endsWith('/logs')) data = { records: logs, next_before: 11 };
+      else if (path.endsWith('/records/users') && req.method() === 'GET') data = { records: users, total: users.length };
+      else if (path.endsWith('/records/models') && req.method() === 'GET') data = { records: models, total: models.length };
+      await route.fulfill({ json: { data } });
+    });
+    await page.route('https://game.test/api/v1/**', async route => {
+      const req = route.request(), url = new URL(req.url());
+      if (url.pathname.endsWith('/game-server')) return route.abort('failed');
+      assert.equal(req.headers().authorization, 'Bearer signed-management-ticket');
+      assert(!req.headers().authorization.includes('admin-test-secret'));
+      if (req.method() !== 'GET') writes.push({ path: url.pathname, method: req.method(), body: req.postData() ? req.postDataJSON() : null });
+      const data = url.pathname.endsWith('/logs') ? { records: logs, next_before: 11 } : [{ id: 'world-1', name: '营养循环实验', owner_user_id: '7', level_id: 'basic', status: 'active' }];
+      await route.fulfill({ json: { data } });
+    });
+    await page.goto(`${process.env.ADMIN_TEST_URL || 'http://127.0.0.1:1423'}/admin/`);
+    await page.getByLabel('中心 API 地址').fill('https://central.test/api/v1');
+    await page.getByLabel('管理员令牌').fill('admin-test-secret');
+    await page.getByRole('button', { name: '登录后台' }).click();
+    await page.getByRole('cell', { name: 'River', exact: true }).waitFor();
+    await page.getByRole('button', { name: '编辑用户与资产' }).click();
+    await page.getByLabel('能量币', { exact: true }).fill('9007199254740995');
+    await page.getByRole('button', { name: '保存', exact: true }).click();
+    await page.getByRole('dialog').waitFor({ state: 'hidden' });
+    assert.equal(writes[0].body.energy_coins, '9007199254740995');
+    assert.equal(writes[0].path, '/api/v1/admin/records/users/9007199254740993');
+    assert.deepEqual(writes[0].body.bio_soup, { water: '200' });
+    await page.getByRole('button', { name: '新增', exact: true }).click();
+    await page.getByLabel('用户名', { exact: true }).fill('New user');
+    await page.getByLabel('邮箱', { exact: true }).fill('new@example.test');
+    await page.getByLabel('密码', { exact: true }).fill('test-password');
+    await page.getByRole('button', { name: '保存', exact: true }).click();
+    await page.getByRole('dialog').waitFor({ state: 'hidden' });
+    assert(writes.some(w => w.method === 'POST' && w.body?.username === 'New user'));
+    await page.getByRole('button', { name: '删除用户', exact: true }).click();
+    await page.getByRole('alertdialog').getByRole('button', { name: '取消', exact: true }).click();
+    assert(!writes.some(w => w.method === 'DELETE'));
+    await page.getByRole('button', { name: '删除用户', exact: true }).click();
+    await page.getByRole('alertdialog').getByRole('button', { name: '删除', exact: true }).click();
+    await page.getByRole('alertdialog').waitFor({ state: 'hidden' });
+    await page.getByRole('cell', { name: 'River', exact: true }).waitFor({ state: 'hidden' });
+    await page.getByRole('button', { name: '生物模型', exact: true }).click();
+    await page.getByRole('button', { name: '新增', exact: true }).click();
+    await page.getByLabel('模型名称').fill('初始细胞');
+    await page.getByLabel('所属用户 ID').fill('7');
+    await page.getByRole('button', { name: '保存', exact: true }).click();
+    await page.getByRole('dialog').waitFor({ state: 'hidden' });
+    const model = writes.find(w => w.path.endsWith('/records/models') && w.method === 'POST');
+    assert(model.body.composition.root_body);
+    await page.getByRole('button', { name: '删除模型', exact: true }).click();
+    await page.getByRole('alertdialog').getByRole('button', { name: '删除', exact: true }).click();
+    await page.getByRole('alertdialog').waitFor({ state: 'hidden' });
+    await page.getByRole('cell', { name: '测试模型', exact: true }).waitFor({ state: 'hidden' });
+    await page.getByRole('button', { name: '游戏服', exact: true }).click();
+    await page.getByRole('button', { name: '新增', exact: true }).click();
+    await page.getByLabel('Server ID').fill('new-game');
+    await page.getByLabel('名称', {exact:true}).fill('新游戏服');
+    await page.getByRole('button', { name:'保存',exact:true }).click();
+    const keyDialog = page.getByRole('dialog', {name:'游戏服接入密钥'});
+    await keyDialog.waitFor();
+    assert.equal(await keyDialog.getByLabel('验证密钥').inputValue(),'generated-server-key-012345678901234567890123');
+    await page.screenshot({ path:`${process.env.TEMP}/life-admin-registration-key.png` });
+    await keyDialog.getByRole('button',{name:'完成',exact:true}).click();
+    await page.getByRole('button',{name:'重置接入密钥',exact:true}).click();
+    await page.getByRole('alertdialog',{name:'重置接入密钥'}).getByRole('button',{name:'生成新密钥'}).click();
+    await keyDialog.waitFor();
+    await keyDialog.getByRole('button',{name:'完成',exact:true}).click();
+    await page.getByRole('button', { name: '查看日志', exact: true }).click();
+    await page.getByText('Python worker timeout', { exact: false }).waitFor();
+    await page.screenshot({ path: `${process.env.TEMP}/life-admin-desktop.png` });
+    await page.getByLabel('日志类别').selectOption('network');
+    await page.getByRole('button', { name: '刷新', exact: true }).waitFor({ state: 'visible' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({ path: `${process.env.TEMP}/life-admin-mobile.png` });
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
+    await page.getByRole('button', { name: '世界管理', exact: true }).click();
+    await page.getByRole('button', { name: '暂停世界' }).click();
+    await page.getByRole('button', { name: '刷新', exact: true }).waitFor({ state: 'visible' });
+    assert(writes.some(w => w.method === 'PATCH' && w.body?.status === 'paused'));
+    await page.getByRole('button', { name: '恢复世界' }).click();
+    await page.getByRole('button', { name: '暂停世界' }).waitFor();
+    assert(writes.some(w => w.method === 'PATCH' && w.body?.status === 'active'));
+    await page.getByRole('button', { name: '删除世界' }).click();
+    await page.getByRole('alertdialog').getByRole('button', { name: '删除', exact: true }).click();
+    await page.getByRole('alertdialog').waitFor({ state: 'hidden' });
+    assert(writes.some(w => w.method === 'DELETE' && w.path.endsWith('/management/worlds/world-1')));
+    await page.getByRole('cell', { name: '营养循环实验', exact: true }).waitFor({ state: 'hidden' });
+    assert.equal(await page.locator('.error:visible').count(), 0);
+    await page.getByRole('button', { name: '退出登录', exact: true }).click();
+    assert.equal(await page.evaluate(() => sessionStorage.getItem('life-admin-token')), null);
+    assert.deepEqual(errors, []);
+    console.log('PASS: admin user/assets/model forms, deletion confirmation, remote log credentials, world controls, logout and responsive layout.');
+  } finally { await browser.close(); }
+})().catch(error => { console.error(error); process.exitCode = 1; });

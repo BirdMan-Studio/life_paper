@@ -13,6 +13,8 @@ const assert = require('node:assert/strict');
     let manualRuns = 0;
     let failSave = false;
     let failLogs = false;
+    await page.route('**/api/v1/game-servers', route => route.fulfill({ json: { deployment_mode: 'combined', data: [] } }));
+    await page.route('**/api/v1/worlds', route => route.fulfill({ json: { data: [] } }));
     await page.route('**/api/v1/worlds/*/organisms/*/*', async route => {
       const request = route.request();
       const url = new URL(request.url());
@@ -41,12 +43,18 @@ const assert = require('node:assert/strict');
       return route.fulfill({ status: 409 });
     });
     let posts = 0;
+    await page.route('**/api/v1/python-api', route => route.fulfill({ json: { data: {
+      components: [{ id: 'body', name: 'Body', properties: { non_gas_capacity_mg: 2000, gas_capacity_ul: 4000 } }],
+      substances: [{ id: 'monosaccharide', name: '单糖' }, { id: 'oxygen', name: '氧气' }],
+    } } }));
     await page.route('**/api/v1/worlds/*/organisms', async route => {
       const request = route.request();
       const worldId = new URL(request.url()).pathname.split('/').at(-2);
       if (request.method() === 'POST') {
         posts++;
-        assert.deepEqual(request.postDataJSON(), { model_id: 'model' });
+        assert.deepEqual(request.postDataJSON(), posts === 1 ? { model_id: 'model', initial_contents: {
+          body: { non_gas_contents_mg: { monosaccharide: 500.5 }, gas_contents_ul: { oxygen: 1000 } },
+        } } : { model_id: 'model' });
         await new Promise(resolve => setTimeout(resolve, 150));
         const organism = { id: `instance-${posts}`, name: 'Server organism', model_id: 'model', position: { x: 720, y: -480 }, rotation_mdeg: 0,
           composition: { root_body: 'body', components: { body: { id: 'body', component: 'body', placement: { position: { x: 0, y: 0 }, size: { width_px: 20, length_px: 40 } } } } },
@@ -63,14 +71,16 @@ const assert = require('node:assert/strict');
       const { default: WorldView } = await import('/src/views/WorldView.vue');
       const sceneSource = await (await fetch('/src/components/WorldScene.vue')).text();
       const { useDataStore } = await import(sceneSource.match(/from\s+["']([^"']*\/stores\/data\.js[^"']*)["']/)[1]);
-      const { setApiBase } = await import('/src/api/http.js');
+      const { setApiBase, worldApi } = await import(source.match(/from\s+["']([^"']*\/api\/http\.js[^"']*)["']/)[1]);
       setApiBase(`${location.origin}/api/v1`);
+      await worldApi.list();
       useDataStore().allComponents.value = [{ id: 'body', category: 'body', model: { geometry: 'capsule', size: { width_px: 20, length_px: 40 }, appearance: { fill: '#ff0000', stroke: '#ffffff' } } }];
       const root = document.createElement('div'); document.body.replaceChildren(root);
       document.body.style.minWidth = '0';
       createApp({ render: () => h(WorldView, {
         worlds: ['first', 'second'].map(id => ({ id, name: id, level_id: 'test', status: 'active' })),
-        models: [{ id: 'model', name: 'Test model' }], ground: {},
+        models: [{ id: 'model', name: 'Test model', composition: { components: { body: { component: 'body' } } } }], ground: {},
+        onNotify: message => { window.testWorldNotice = message; },
       }) }).mount(root);
     });
     await page.locator('.world-list-item').filter({ hasText: 'first' }).click();
@@ -86,14 +96,32 @@ const assert = require('node:assert/strict');
     await matterCheckbox.check();
     const add = page.getByTitle('添加生物', { exact: true });
     await add.click();
-    const create = page.locator('.organism-picker button');
+    await page.locator('.organism-picker button').click();
+    const dialog = page.getByRole('dialog', { name: '添加生物 · Test model' });
+    const create = dialog.locator('button[type="submit"]');
+    await dialog.getByRole('button', { name: '添加物资', exact: true }).click();
+    await dialog.getByLabel('数量', { exact: true }).fill('2001');
+    assert(await create.isDisabled(), 'Over-capacity contents cannot be submitted');
+    await dialog.getByLabel('数量', { exact: true }).fill('500.5');
+    await dialog.getByRole('button', { name: '添加物资', exact: true }).click();
+    const gasRow = dialog.locator('.spawn-row').nth(1);
+    await gasRow.getByLabel('储存类型').selectOption('gas_contents_ul');
+    await gasRow.getByLabel('物质', { exact: true }).selectOption('oxygen');
+    await gasRow.getByLabel('数量', { exact: true }).fill('1000.5');
+    assert(await create.isDisabled(), 'Gas volumes must be integer microliters');
+    await gasRow.getByLabel('数量', { exact: true }).fill('1000');
+    await page.screenshot({ path: `${process.env.TEMP}/life-spawn-desktop.png` });
+    await page.setViewportSize({ width: 390, height: 844 });
+    assert(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth), 'Mobile dialog must fit its width');
+    await page.screenshot({ path: `${process.env.TEMP}/life-spawn-mobile.png` });
+    await page.setViewportSize({ width: 1280, height: 800 });
     await create.click();
-    assert(await create.isDisabled(), 'Creation must disable duplicate submissions');
+    assert(await create.isDisabled(), `Creation must disable duplicate submissions (posts=${posts}, notice=${await page.evaluate(() => window.testWorldNotice)})`);
     await page.locator('.world-creature-row').waitFor();
     assert.equal(await page.locator('.world-creature-row strong').textContent(), 'Server organism');
     assert.equal(posts, 1);
     await page.locator('.world-creature-row').click();
-    assert.equal(await page.locator('.code-editor').count(), 0, 'Only the explicit enter action opens the instance');
+    assert.equal(await page.locator('.cm-content').count(), 0, 'Only the explicit enter action opens the instance');
     const firstRow = page.locator('.world-creature-row').first();
     assert.equal(await firstRow.locator('button').count(), 3);
     const canvas = page.locator('.world-canvas');
@@ -154,17 +182,18 @@ const assert = require('node:assert/strict');
     await page.keyboard.press('Escape');
     assert.equal(await page.locator('dialog').count(), 0);
     await firstRow.getByTitle('进入实例', { exact: true }).click();
-    await page.locator('.code-editor').waitFor();
+    await page.locator('.cm-content').waitFor();
     instances.first[0].component_states.body.energy_mj = 999;
     await page.waitForFunction(() => document.querySelector('.component-information-text')?.value.includes('999 mJ'));
     instances.first[0].component_states.body.energy_mj = 998;
     await page.waitForFunction(() => document.querySelector('.component-information-text')?.value.includes('998 mJ'));
-    assert.equal(await page.locator('.code-editor').inputValue(), 'speed = 1\n');
+    const editorText = () => page.locator('.cm-content .cm-line').evaluateAll(lines => lines.map(line => line.textContent).join('\n'));
+    assert.equal(await editorText(), 'speed = 1\n');
     assert.equal(await page.locator('.detail-actions .danger-btn').count(), 0);
     const mainRow = page.locator('.file-row').filter({ hasText: 'main.py' });
     assert(await mainRow.locator('.file-actions button').first().isDisabled());
     assert(await mainRow.locator('.file-actions button').nth(1).isDisabled());
-    await page.locator('.code-editor').fill('speed = 2\n');
+    await page.locator('.cm-content').fill('speed = 2\n');
     await Promise.all([
       page.waitForResponse(response => response.request().method() === 'PUT'),
       page.locator('.code-actions button').first().click(),
@@ -172,15 +201,16 @@ const assert = require('node:assert/strict');
     assert.equal(programs['instance-1']['main.py'], 'speed = 2\n');
     await page.locator('.detail-toolbar > button').click();
     await page.locator('.world-creature-row').getByTitle('进入实例', { exact: true }).click();
-    await page.locator('.code-editor').waitFor();
-    assert.equal(await page.locator('.code-editor').inputValue(), 'speed = 2\n');
+    await page.locator('.cm-content').waitFor();
+    assert.equal(await editorText(), 'speed = 2\n');
     await page.locator('.detail-toolbar > button').click();
     await add.click();
     await page.locator('.organism-picker button').click();
+    await page.getByRole('dialog').getByRole('button', { name: '创建实例', exact: true }).click();
     await page.locator('.world-creature-row').nth(1).waitFor();
     await page.locator('.world-creature-row').nth(1).getByTitle('进入实例', { exact: true }).click();
-    await page.locator('.code-editor').waitFor();
-    assert.equal(await page.locator('.code-editor').inputValue(), 'speed = 1\n');
+    await page.locator('.cm-content').waitFor();
+    assert.equal(await editorText(), 'speed = 1\n');
     assert.equal(programs['instance-1']['main.py'], 'speed = 2\n');
     await page.locator('.detail-toolbar > button').click();
     await page.getByTitle('返回世界列表', { exact: true }).click();
@@ -194,7 +224,7 @@ const assert = require('node:assert/strict');
     await page.locator('.world-creature-row').first().waitFor();
     assert.equal(await page.locator('.world-creature-row').count(), 2);
     await page.locator('.world-creature-row').first().getByTitle('进入实例', { exact: true }).click();
-    await page.locator('.code-editor').fill('def main(game):\n    game.log("hello organism")\n');
+    await page.locator('.cm-content').fill('def main(game):\n    game.log("hello organism")\n');
     const run = page.getByTitle('运行 AI', { exact: true });
     assert.equal(await run.count(), 0, 'Instance details must not offer manual AI execution');
     await Promise.all([
@@ -214,7 +244,7 @@ const assert = require('node:assert/strict');
     await page.screenshot({ path: `${process.env.TEMP}/life-world-logs.png`, fullPage: true });
     await page.getByTitle('关闭', { exact: true }).click();
     await firstRow.getByTitle('进入实例', { exact: true }).click();
-    await page.locator('.code-editor').waitFor();
+    await page.locator('.cm-content').waitFor();
     assert.equal(await run.count(), 0);
     failSave = true;
     await Promise.all([

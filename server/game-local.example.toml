@@ -1,0 +1,13 @@
+server_id = "local"
+host = "127.0.0.1"
+port = 8081
+data_dir = "data-local"
+
+[auth]
+mode = "local"
+# Replace with a random token before use; local mode is restricted to loopback.
+token = "REPLACE_WITH_A_RANDOM_TOKEN_AT_LEAST_32_CHARACTERS"
+
+[ai]
+enabled = false
+python = "python"

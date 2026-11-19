@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, HashSet};
 const DT: f64 = 0.05;
 const STEPS: usize = 20;
 const THRUST_PER_MG: f64 = 8.0;
+const EJECTA_SPEED_PX_PER_SECOND: f64 = 40.0;
 const MAX_SPEED: f64 = 120.0;
 const MAX_ANGULAR_SPEED: f64 = 3.0;
 const MAX_RADIUS: f64 = 512.0;
@@ -279,12 +280,16 @@ fn execute_with_matter(
         }
         let builtin = builtin_component_api(part.component.as_str());
         let api = state.properties.api.as_ref().unwrap_or(&builtin);
-        let (rate_mg_per_tick, material, angle_deg) = match command.action {
+        let (rate_mg_per_tick, material, angle_deg, in_place) = match command.action {
+            ComponentAction::JetInPlace {
+                material,
+                rate_mg_per_tick,
+            } => (rate_mg_per_tick, material, 0.0, true),
             ComponentAction::Jet {
                 rate_mg_per_tick,
                 material,
                 angle_deg,
-            } => (rate_mg_per_tick, material, angle_deg),
+            } => (rate_mg_per_tick, material, angle_deg, false),
             ComponentAction::AbsorbAir { rate_ml_per_tick } => {
                 let Some(spec) = api.absorption.clone() else {
                     continue;
@@ -555,22 +560,32 @@ fn execute_with_matter(
                 source.non_gas_contents_mg.insert(id.clone(), remaining);
             }
             if actual_mass > 0.0 {
+                let rotation = pose(organism).rotation;
+                let direction = rotation * vector![angle.cos(), angle.sin()];
+                let mut velocity = Vector::zeros();
+                if !in_place {
+                    velocity = direction * EJECTA_SPEED_PX_PER_SECOND;
+                    if let Some(motion) = organism.motion.as_ref().filter(|motion| motion.valid()) {
+                        let offset = rotation * r;
+                        velocity += vector![motion.velocity_x, motion.velocity_y]
+                            + vector![-offset.y, offset.x] * motion.angular_velocity;
+                    }
+                }
                 matter
-                    .deposit(
-                        MapPosition {
-                            x: outlet.x.floor() as i32,
-                            y: outlet.y.floor() as i32,
-                        },
-                        0,
+                    .eject(
+                        [outlet.x, outlet.y],
+                        [velocity.x, velocity.y],
                         [(id, actual_mass)].into(),
-                        Some(exchange_source),
+                        exchange_source,
                     )
                     .expect("finite jet mass");
             }
         }
-        let force = -vector![angle.cos(), angle.sin()] * actual_mass * THRUST_PER_MG;
-        drive.force += force;
-        drive.torque += r.x * force.y - r.y * force.x;
+        if !in_place {
+            let force = -vector![angle.cos(), angle.sin()] * actual_mass * THRUST_PER_MG;
+            drive.force += force;
+            drive.torque += r.x * force.y - r.y * force.x;
+        }
     }
     if organism.component_states.values().all(|s| s.energy_mj == 0) {
         organism.ai.pending_commands.clear();
@@ -827,7 +842,7 @@ mod tests {
     }
 
     #[test]
-    fn jet_consumes_material_and_deposits_actual_mass_with_angle_steps() {
+    fn jet_consumes_material_and_ejects_actual_mass_with_angle_steps() {
         let (world, terrains) = flat("grassland");
         let mut organism = creature(0);
         let root = organism.composition.root_body.unwrap();
@@ -857,6 +872,11 @@ mod tests {
         );
         assert_eq!(matter.records.len(), 1);
         assert_eq!(matter.records[0].added_mg[&water], 25.0);
+        assert_eq!(matter.ejecta.len(), 1);
+        assert_eq!(matter.ejecta[0].amounts_mg[&water], 25.0);
+        let velocity = vector![matter.ejecta[0].velocity_x, matter.ejecta[0].velocity_y];
+        assert!((velocity.norm() - EJECTA_SPEED_PX_PER_SECOND).abs() < 1e-8);
+        assert!(velocity.dot(&drive.force) < 0.0);
         assert_eq!(
             matter.records[0].source.as_ref().unwrap().organism_id,
             organism.id
@@ -880,6 +900,98 @@ mod tests {
     }
 
     #[test]
+    fn in_place_discharge_has_no_thrust_or_material_velocity_even_when_moving() {
+        let (world, terrains) = flat("grassland");
+        for material in ["water", "oxygen"] {
+            let mut organism = creature(10);
+            let root = organism.composition.root_body.unwrap();
+            let id = crate::domain::element::ElementId::new(material).unwrap();
+            organism
+                .component_states
+                .get_mut(&root)
+                .unwrap()
+                .container
+                .gas_contents_ul
+                .insert(id.clone(), if material == "oxygen" { 10_000 } else { 0 });
+            organism.motion = Some(MotionState {
+                velocity_x: 12.0,
+                velocity_y: -7.0,
+                angular_velocity: 0.5,
+                ..Default::default()
+            });
+            organism.ai.pending_commands[0].action = ComponentAction::JetInPlace {
+                material: material.into(),
+                rate_mg_per_tick: 31.0,
+            };
+            let center = geometry(&organism).unwrap().mass.local_com;
+            let motion = organism.motion.clone();
+            let energy = organism.component_states[&root].energy_mj;
+            let jet = organism.ai.pending_commands[0].component_id;
+            let outlet = pose(&organism)
+                * Point::from(local_position(
+                    &organism.composition.components[&jet],
+                    &organism,
+                ));
+            let mut matter = world.matter.clone();
+            let drive = execute_with_matter(&mut organism, center, &world, &terrains, &mut matter);
+            assert_eq!(drive.force, Vector::zeros());
+            assert_eq!(drive.torque, 0.0);
+            assert_eq!(organism.motion, motion);
+            assert!(organism.component_states[&root].energy_mj < energy - 5);
+            assert_eq!(matter.records.len(), 1);
+            if material == "water" {
+                let cloud = &matter.ejecta[0];
+                assert_eq!(cloud.amounts_mg[&id], 20.0);
+                assert_eq!([cloud.velocity_x, cloud.velocity_y], [0.0, 0.0]);
+                assert_eq!([cloud.x, cloud.y], [outlet.x, outlet.y]);
+                assert_eq!(
+                    organism.component_states[&root]
+                        .container
+                        .non_gas_contents_mg[&id],
+                    1980.0
+                );
+                matter.advance_tick();
+                assert_eq!(
+                    [matter.ejecta[0].x, matter.ejecta[0].y],
+                    [outlet.x, outlet.y]
+                );
+                assert!(matter.ejecta[0].radius_px > 0.0);
+                assert_eq!(matter.ejecta[0].amounts_mg[&id], 18.0);
+            } else {
+                assert!(matter.ejecta.is_empty());
+                assert!(organism.component_states[&root].container.gas_contents_ul[&id] < 10_000);
+                assert!(!matter.records[0].gas_added_ul.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn ejecta_inherits_translation_rotation_and_world_facing() {
+        let (world, terrains) = flat("grassland");
+        let mut organism = creature(10);
+        organism.motion = Some(MotionState {
+            angle_rad: std::f64::consts::FRAC_PI_2,
+            velocity_x: 12.0,
+            velocity_y: -7.0,
+            angular_velocity: 0.5,
+            ..Default::default()
+        });
+        let center = geometry(&organism).unwrap().mass.local_com;
+        let jet = organism.ai.pending_commands[0].component_id;
+        let part = &organism.composition.components[&jet];
+        let outlet = pose(&organism) * Point::from(local_position(part, &organism));
+        let offset = pose(&organism).rotation * (local_position(part, &organism) - center.coords);
+        let expected = vector![40.0 + 12.0 - 0.5 * offset.y, -7.0 + 0.5 * offset.x];
+        let mut matter = world.matter.clone();
+        execute_with_matter(&mut organism, center, &world, &terrains, &mut matter);
+        let cloud = &matter.ejecta[0];
+        assert!((cloud.x - outlet.x).abs() < 1e-8);
+        assert!((cloud.y - outlet.y).abs() < 1e-8);
+        assert!((cloud.velocity_x - expected.x).abs() < 1e-8);
+        assert!((cloud.velocity_y - expected.y).abs() < 1e-8);
+    }
+
+    #[test]
     fn gas_jet_respects_volume_and_energy_limits_without_world_deposit() {
         let (world, terrains) = flat("grassland");
         let mut organism = creature(0);
@@ -900,6 +1012,7 @@ mod tests {
         let center = geometry(&organism).unwrap().mass.local_com;
         let mut matter = world.matter.clone();
         let drive = execute_with_matter(&mut organism, center, &world, &terrains, &mut matter);
+        assert!(matter.ejecta.is_empty());
         let remaining = organism.component_states[&root].container.gas_contents_ul[&oxygen];
         assert!((7999..=8001).contains(&remaining));
         assert!(

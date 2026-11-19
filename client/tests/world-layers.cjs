@@ -77,6 +77,7 @@ function assertVerticalShift(before, after, deltaY) {
       assert(base.equals(await canvas.screenshot()), 'Removing organisms must restore the ground map');
     }
     await page.setViewportSize({ width: 1280, height: 800 });
+    await page.addStyleTag({ content: '.map-navigation, .map-scale { visibility: hidden !important; }' });
     await page.locator('.world-canvas').evaluate(element => { element.style.width = '640px'; element.style.height = '384px'; });
     await page.evaluate(() => window.dispatchEvent(new Event('resize')));
     const canvas = page.locator('canvas');

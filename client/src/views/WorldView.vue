@@ -1,14 +1,16 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { organismApi } from '../api/http'
-import { ArrowLeft, ChevronRight, Crosshair, FileText, LogIn, Pause, Play, Plus, RefreshCw } from 'lucide-vue-next'
+import { organismApi, apiRequest } from '../api/http'
+import { ArrowLeft, BookOpen, ChevronRight, Crosshair, FileText, HardDrive, LogIn, Pause, Play, Plus, RefreshCw, Users } from 'lucide-vue-next'
 import WorldScene from '../components/WorldScene.vue'
 import ModelDetailView from './ModelDetailView.vue'
 import OrganismLogDialog from '../components/OrganismLogDialog.vue'
+import SpawnOrganismDialog from '../components/SpawnOrganismDialog.vue'
 import { useI18n } from '../i18n'
 
-const props = defineProps({ worlds: Array, activeWorld: Object, ground: Object, wallet: Object, models: Array, loading: Boolean })
-const emit = defineEmits(['select-world', 'toggle-world', 'tutorial', 'notify'])
+const props = defineProps({ worlds: Array, tutorials: Array, gameServers: Array, worldMode: { type: String, default: 'multiplayer' }, worldReady: { type: Boolean, default: true }, activeWorld: Object, ground: Object, wallet: Object, models: Array, loading: Boolean, createLocalWorld: Function, openTutorial: Function })
+const emit = defineEmits(['select-mode', 'select-tutorial', 'select-world', 'close-world', 'refresh-worlds', 'toggle-world', 'notify'])
+const modes = [{ id: 'singleplayer', label: '单人', icon: HardDrive }, { id: 'multiplayer', label: '多人', icon: Users }, { id: 'tutorial', label: '教程', icon: BookOpen }]
 const { t } = useI18n()
 const selectedWorldId = ref(null)
 const editingOrganism = ref(null)
@@ -16,23 +18,77 @@ const logsOrganism = ref(null)
 const worldScene = ref(null)
 const instanceProgramApi = computed(() => editingOrganism.value ? organismApi.program(selectedWorldId.value, editingOrganism.value.id) : null)
 const createBusy = ref(false)
+const creatingWorld = ref(false), worldName = ref('')
+const localMode = computed(() => props.worldMode === 'singleplayer')
+const modeLabel = computed(() => modes.find(mode => mode.id === props.worldMode)?.label || '')
 const showOrganisms = ref(true)
 const showMatter = ref(true)
 const tileHover = ref(null)
 const organisms = ref([])
 const addingOrganism = ref(false)
+const spawnModel = ref(null)
 const organismBusy = ref(false)
 const organismsLoading = ref(false)
+const tutorialState = ref(null)
+const spawnModels = computed(() => props.worldMode === 'tutorial' ? tutorialState.value?.models || [] : props.models || [])
+const openingTutorial = ref(false)
+const tutorialGraph = computed(() => {
+  const entries = props.tutorials || [], ranks = new Map()
+  function rank(entry, visiting = new Set()) {
+    if (ranks.has(entry.id)) return ranks.get(entry.id)
+    if (visiting.has(entry.id)) return 0
+    const path = new Set(visiting).add(entry.id)
+    const parents = (entry.prerequisites || []).map(id => entries.find(item => item.id === id)).filter(Boolean)
+    const value = parents.length ? 1 + Math.max(...parents.map(parent => rank(parent, path))) : 0
+    ranks.set(entry.id, value)
+    return value
+  }
+  entries.forEach(entry => rank(entry))
+  const columns = new Map()
+  entries.forEach(entry => { const depth = ranks.get(entry.id); columns.set(depth, [...(columns.get(depth) || []), entry]) })
+  const rows = Math.max(1, ...Array.from(columns.values(), items => items.length))
+  const nodes = entries.map((entry, index) => {
+    const column = columns.get(ranks.get(entry.id))
+    return { ...entry, index, x: ranks.get(entry.id) * 300, y: ((rows - column.length) / 2 + column.indexOf(entry)) * 154 }
+  })
+  const edges = nodes.flatMap(node => (node.prerequisites || []).flatMap(id => {
+    const parent = nodes.find(item => item.id === id)
+    if (!parent) return []
+    const x = parent.x + 240, y = parent.y + 58, endY = node.y + 58
+    return [{ id: `${id}-${node.id}`, path: `M${x},${y} H${x + 30} V${endY} H${node.x}` }]
+  }))
+  return { nodes, edges, width: Math.max(240, ...nodes.map(node => node.x + 240)), height: rows * 154 - 38 }
+})
+watch(() => props.activeWorld?.id, id => { selectedWorldId.value = id || null })
+async function openTutorial(tutorial) {
+  if (openingTutorial.value) return
+  openingTutorial.value = true
+  try { await props.openTutorial?.(tutorial) }
+  finally { openingTutorial.value = false }
+}
+function tutorialLocked(tutorial) {
+  if (props.worlds?.some(world => world.tutorial_id === tutorial.id)) return false
+  return tutorial.prerequisites?.some(id => !props.worlds?.some(world => world.tutorial_id === id && world.tutorial_completed))
+}
+async function refreshTutorial(worldId, revision) {
+  if (props.worldMode !== 'tutorial') return
+  const result = await apiRequest(`/worlds/${worldId}/tutorial`)
+  if (worldId !== selectedWorldId.value || revision !== organismRequest) return
+  tutorialState.value = result.data
+  const world = props.worlds?.find(world => world.id === worldId)
+  if (world) world.tutorial_completed = result.data?.completed || false
+}
 let organismRequest = 0
 let pollTimer
 let polling = false
 async function refreshOrganismStates() {
   const worldId = selectedWorldId.value
   const revision = organismRequest
-  if (!worldId || polling || organismsLoading.value || organismBusy.value) return
+  if (!worldId || !props.worldReady || polling || organismsLoading.value || organismBusy.value) return
   polling = true
   try {
     const result = await organismApi.list(worldId)
+    await refreshTutorial(worldId, revision)
     if (worldId !== selectedWorldId.value || revision !== organismRequest) return
     for (const current of organisms.value) {
       const latest = result.data.find(item => item.id === current.id)
@@ -48,28 +104,41 @@ async function refreshOrganismStates() {
   finally { polling = false }
 }
 onMounted(() => { pollTimer = window.setInterval(refreshOrganismStates, 1500) })
-onBeforeUnmount(() => { window.clearInterval(pollTimer); organismRequest += 1 })
+onBeforeUnmount(() => { window.clearInterval(pollTimer); organismRequest += 1; emit('close-world') })
 const selectedWorld = computed(() => props.worlds?.find(world => world.id === selectedWorldId.value) || null)
 const soupTotal = computed(() => props.wallet?.bio_soup?.reduce((sum, item) => sum + item.amount, 0) || 0)
 
 function openWorld(world) { selectedWorldId.value = world.id; emit('select-world', world.id) }
-function showWorldList() { selectedWorldId.value = null }
+function showWorldList() { selectedWorldId.value = null; emit('close-world') }
+function chooseMode(mode) { selectedWorldId.value = null; creatingWorld.value = false; emit('select-mode', mode) }
 function locateOrganism(organism) {
   showOrganisms.value = true
   tileHover.value = null
   worldScene.value?.focusPosition(organism.position)
 }
-async function createTutorial() { createBusy.value = true; emit('tutorial'); createBusy.value = false }
-watch(selectedWorldId, async (worldId) => {
+async function createSavedWorld() {
+  if (createBusy.value) return
+  createBusy.value = true
+  try { await props.createLocalWorld?.(worldName.value.trim()); creatingWorld.value = false }
+  catch (error) { emit('notify', error.message, 'error') }
+  finally { createBusy.value = false }
+}
+function newLocalWorld() { worldName.value = ''; creatingWorld.value = true }
+watch([selectedWorldId, () => props.worldReady], async ([worldId, ready]) => {
   editingOrganism.value = null
   logsOrganism.value = null
   const request = ++organismRequest
   organisms.value = []
+  tutorialState.value = null
   addingOrganism.value = false
+  spawnModel.value = null
   organismsLoading.value = !!worldId
-  if (!worldId) return
+  if (!worldId || !ready) return
   try {
+    const spawn = selectedWorld.value?.tutorial_definition?.map?.spawn || props.tutorials?.find(tutorial => tutorial.map?.level_id === selectedWorld.value?.level_id)?.map?.spawn
+    if (props.worldMode === 'tutorial' && spawn) worldScene.value?.focusPosition(spawn)
     const result = await organismApi.list(worldId)
+    await refreshTutorial(worldId, request)
     if (request === organismRequest) organisms.value = result.data
   } catch (error) {
     if (request === organismRequest) emit('notify', error.message, 'error')
@@ -77,15 +146,16 @@ watch(selectedWorldId, async (worldId) => {
     if (request === organismRequest) organismsLoading.value = false
   }
 })
-async function addOrganism(model) {
+async function addOrganism(initialContents) {
   if (organismBusy.value || organismsLoading.value || !selectedWorldId.value) return
   const worldId = selectedWorldId.value
   organismBusy.value = true
   try {
-    const result = await organismApi.create(worldId, model.id)
+    const result = await organismApi.create(worldId, spawnModel.value.id, initialContents, props.worldMode === 'tutorial' ? spawnModel.value : undefined)
     if (selectedWorldId.value === worldId) {
       organisms.value.push(result.data)
       addingOrganism.value = false
+      spawnModel.value = null
     }
   } catch (error) { emit('notify', error.message, 'error') }
   finally { organismBusy.value = false }
@@ -95,17 +165,30 @@ async function addOrganism(model) {
 <template>
   <ModelDetailView v-if="editingOrganism" :key="editingOrganism.id" :model="editingOrganism" :program-api="instanceProgramApi" instance-mode @back="editingOrganism = null" />
   <section v-else class="content world-hub">
+    <template v-if="worldMode === null">
+      <div class="world-list-heading"><div><span class="eyebrow cyan-text">LIFE PAPER</span><h2>世界中枢</h2></div></div>
+      <div class="world-mode-list"><button v-for="mode in modes" :key="mode.id" class="world-mode-option" @click="chooseMode(mode.id)"><component :is="mode.icon" :size="25" /><strong>{{ mode.label }}</strong><ChevronRight :size="18" /></button></div>
+    </template>
+    <template v-else>
+    <button v-if="!selectedWorld" class="world-back-btn world-mode-back" @click="chooseMode(null)"><ArrowLeft :size="17" /><span>世界中枢</span></button>
     <div v-if="loading" class="empty-state">{{ t('world.loading') }}</div>
+    <div v-else-if="worldMode === 'tutorial' && !selectedWorld" class="tutorial-tree">
+      <div class="world-list-heading"><div><span class="eyebrow cyan-text">教程</span><h2>教程世界</h2></div><button class="icon-btn" title="刷新教程目录" @click="emit('refresh-worlds')"><RefreshCw :size="17" /></button></div>
+      <div v-if="!tutorials?.length" class="empty-state">暂无教程</div>
+      <div class="tutorial-track"><div class="tutorial-graph" :style="{ width: `${tutorialGraph.width}px`, height: `${tutorialGraph.height}px` }"><svg aria-hidden="true" class="tutorial-connections" :width="tutorialGraph.width" :height="tutorialGraph.height"><path v-for="edge in tutorialGraph.edges" :key="edge.id" :d="edge.path" /></svg><button v-for="tutorial in tutorialGraph.nodes" :key="tutorial.id" class="tutorial-node" :style="{ left: `${tutorial.x}px`, top: `${tutorial.y}px` }" :class="{ locked: tutorialLocked(tutorial) }" :disabled="openingTutorial || tutorialLocked(tutorial)" :title="tutorialLocked(tutorial) ? '需要先通关前置教程' : tutorial.title" @click="openTutorial(tutorial)"><span class="tutorial-node-number">{{ tutorial.index + 1 }}</span><span><strong>{{ tutorial.title }}</strong><small>{{ tutorial.description }}</small><small v-if="worlds.some(world => world.tutorial_id === tutorial.id && world.tutorial_completed)">已通关</small></span><ChevronRight :size="18" /></button></div></div>
+    </div>
     <div v-else-if="!worlds?.length" class="empty-state world-list-empty">
-      <h3>{{ t('world.empty') }}</h3><p>{{ t('world.emptyHint') }}</p>
-      <button class="primary-btn" :disabled="createBusy" @click="createTutorial"><RefreshCw :size="15" />{{ t('world.tutorial') }}</button>
+      <h3>{{ worldMode === 'multiplayer' ? '暂无多人世界' : '暂无单人存档' }}</h3>
+      <p v-if="worldMode === 'multiplayer' && gameServers && !gameServers.length">暂无在线世界服务器</p>
+      <button v-if="localMode" class="primary-btn" :disabled="createBusy" @click="newLocalWorld"><Plus :size="15" />新建单人世界</button>
+      <button class="ghost-btn" :disabled="createBusy" @click="emit('refresh-worlds')"><RefreshCw :size="15" />刷新列表</button>
     </div>
     <template v-else-if="!selectedWorld">
-      <div class="world-list-heading"><div><span class="eyebrow cyan-text">{{ t('labels.worldEyebrow') }}</span><h2>{{ t('world.listTitle') }}</h2><p>{{ t('world.listSubtitle') }}</p></div><span class="world-list-count">{{ worlds.length }}</span></div>
+      <div class="world-list-heading"><div><span class="eyebrow cyan-text">{{ modeLabel }}</span><h2>{{ t('world.listTitle') }}</h2><p>{{ t('world.listSubtitle') }}</p></div><span class="world-list-count">{{ worlds.length }}</span><button v-if="localMode" class="icon-btn" title="新建本地世界" :disabled="createBusy" @click="newLocalWorld"><Plus :size="17" /></button><button class="icon-btn" title="刷新世界列表" @click="emit('refresh-worlds')"><RefreshCw :size="17" /></button></div>
       <div class="world-list-grid">
         <button v-for="world in worlds" :key="world.id" class="world-list-item" :class="{ selected: world.id === activeWorld?.id }" @click="openWorld(world)">
           <span class="world-list-icon"><i class="live-dot" :class="{ paused: world.status !== 'active' }"></i></span>
-          <span class="world-list-main"><strong>{{ world.name }}</strong><small>{{ world.level_id }} · {{ world.kind }}</small><em>{{ world.status === 'active' ? t('world.running') : t('world.paused') }}</em></span>
+          <span class="world-list-main"><strong>{{ world.name }}</strong><small>{{ world.server_name || world.level_id }}<template v-if="world.kind"> · {{ world.kind }}</template></small><em v-if="world.status">{{ world.status === 'active' ? t('world.running') : t('world.paused') }}</em></span>
           <ChevronRight :size="18" />
         </button>
       </div>
@@ -114,7 +197,7 @@ async function addOrganism(model) {
       <div class="world-workspace-header">
         <button class="world-back-btn" title="返回世界列表" @click="showWorldList"><ArrowLeft :size="17" /><span>{{ t('world.listTitle') }}</span></button>
         <div class="world-workspace-title"><span class="eyebrow cyan-text">{{ t('labels.worldMap') }}</span><h2>{{ selectedWorld.name }}</h2></div>
-        <button class="ghost-btn world-pause" @click="emit('toggle-world')"><Pause v-if="selectedWorld.status === 'active'" :size="14" /><Play v-else :size="14" />{{ selectedWorld.status === 'active' ? t('world.pause') : t('world.resume') }}</button>
+        <button v-if="selectedWorld.status" class="ghost-btn world-pause" @click="emit('toggle-world')"><Pause v-if="selectedWorld.status === 'active'" :size="14" /><Play v-else :size="14" />{{ selectedWorld.status === 'active' ? t('world.pause') : t('world.resume') }}</button>
       </div>
       <div class="world-workspace">
         <div class="world-map-panel">
@@ -124,14 +207,15 @@ async function addOrganism(model) {
               <label><input v-model="showOrganisms" type="checkbox" />生物层</label>
               <label><input v-model="showMatter" type="checkbox" />汤层</label>
             </div>
-            <span class="world-map-status"><i class="live-dot" :class="{ paused: selectedWorld.status !== 'active' }"></i>{{ selectedWorld.status === 'active' ? t('world.running') : t('world.paused') }}</span>
+            <span v-if="selectedWorld.status" class="world-map-status"><i class="live-dot" :class="{ paused: selectedWorld.status !== 'active' }"></i>{{ selectedWorld.status === 'active' ? t('world.running') : t('world.paused') }}</span>
           </div>
           <WorldScene ref="worldScene" :ground="ground" :show-organisms="showOrganisms" :show-matter="showMatter" :organisms="organisms" @tile-hover="tileHover = $event" />
           <div v-if="tileHover" class="tile-inspector"><b>({{ tileHover.x }}, {{ tileHover.y }}) · {{ tileHover.key }}</b><span>高度 {{ tileHover.height }}%　干湿 {{ tileHover.moisture }}%</span><span>营养 {{ tileHover.nutrients }}%　温度 {{ tileHover.temperature }}%</span></div>
         </div>
         <aside class="world-creature-panel">
-          <div class="world-creature-heading"><div><span class="eyebrow">{{ t('world.creatureEyebrow') }}</span><h3>{{ t('world.creatures') }}</h3></div><button class="icon-btn" title="添加生物" :disabled="organismBusy || organismsLoading" @click="addingOrganism = !addingOrganism"><Plus :size="17" /></button></div>
-          <div v-if="addingOrganism" class="organism-picker"><button v-for="model in models" :key="model.id" :disabled="organismBusy || organismsLoading" @click="addOrganism(model)">{{ model.name }}</button><small v-if="!models?.length">{{ t('world.noCreaturesHint') }}</small></div>
+          <section v-if="tutorialState" class="tutorial-instructions" aria-label="教程任务"><template v-for="panel in tutorialState.panels" :key="panel.event_id"><h3 v-if="panel.title">{{ panel.title }}</h3><p v-if="panel.message">{{ panel.message }}</p><ol v-if="panel.steps"><li v-for="step in panel.steps" :key="step">{{ step }}</li></ol></template><strong v-if="tutorialState.completed">已通关</strong></section>
+          <div class="world-creature-heading"><div><span class="eyebrow">{{ t('world.creatureEyebrow') }}</span><h3>{{ t('world.creatures') }}</h3></div><button v-if="!localMode" class="icon-btn" title="添加生物" :disabled="organismBusy || organismsLoading" @click="addingOrganism = !addingOrganism"><Plus :size="17" /></button></div>
+          <div v-if="addingOrganism" class="organism-picker"><button v-for="model in spawnModels" :key="model.id" :disabled="organismBusy || organismsLoading" @click="spawnModel = model">{{ model.name }}</button><small v-if="!spawnModels.length">{{ t('world.noCreaturesHint') }}</small></div>
           <div v-if="organismsLoading" class="world-creature-empty">{{ t('world.loading') }}</div>
           <div v-else-if="!organisms.length" class="world-creature-empty"><span class="component-glyph violet"><Plus :size="17" /></span><strong>{{ t('world.noCreatures') }}</strong><small>{{ t('world.noCreaturesHint') }}</small></div>
           <div v-else class="world-creature-list">
@@ -149,7 +233,10 @@ async function addOrganism(model) {
         </aside>
       </div>
       <OrganismLogDialog v-if="logsOrganism" :world-id="selectedWorldId" :organism="logsOrganism" @close="logsOrganism = null" @updated="logsOrganism.ai = $event" />
+      <SpawnOrganismDialog v-if="spawnModel" :key="spawnModel.id" :model="spawnModel" :busy="organismBusy" @close="spawnModel = null" @confirm="addOrganism" />
     </template>
+    </template>
+    <div v-if="creatingWorld" class="modal-backdrop" @click.self="!createBusy && (creatingWorld = false)"><form class="action-dialog" role="dialog" aria-modal="true" aria-label="新建单人世界" @submit.prevent="createSavedWorld"><h3>新建单人世界</h3><label class="local-world-name">世界名称<input v-model="worldName" required maxlength="128" autofocus :disabled="createBusy" /></label><div class="modal-actions"><button type="button" class="ghost-btn" :disabled="createBusy" @click="creatingWorld = false">取消</button><button class="primary-btn" :disabled="createBusy || !worldName.trim()"><Plus :size="15" />创建</button></div></form></div>
   </section>
 </template>
 
@@ -168,5 +255,11 @@ async function addOrganism(model) {
 .layer-options { display:flex; align-items:center; gap:16px; }
 .layer-options label { display:flex; align-items:center; gap:6px; white-space:nowrap; cursor:pointer; color:#b9cbd5; font-size:11px; }
 .layer-options input { width:14px; height:14px; margin:0; accent-color:var(--cyan); cursor:pointer; }
+.local-world-name{display:flex;flex-direction:column;gap:8px;margin:20px 0;font-size:12px}.local-world-name input{height:38px;max-width:100%;border:1px solid var(--line);background:var(--bg);color:inherit;padding:8px}
+.tutorial-track{overflow:auto;padding:28px 8px 36px}.tutorial-graph{position:relative}.tutorial-connections{position:absolute;inset:0;pointer-events:none}.tutorial-connections path{fill:none;stroke:var(--amber);stroke-width:1.5;opacity:.55}.tutorial-node{position:absolute;display:flex;align-items:center;gap:14px;width:240px;min-height:116px;padding:16px;border:1px solid var(--line);background:rgba(16,25,37,.9);color:var(--amber);text-align:left}.tutorial-node-number{width:30px;height:30px;display:grid;place-items:center;border:1px solid currentColor;border-radius:50%;font:12px 'DM Mono',monospace;flex:none}.tutorial-node span:nth-child(2){display:flex;flex:1;flex-direction:column;gap:7px;min-width:0}.tutorial-node strong{color:#f3ead5;overflow-wrap:anywhere}.tutorial-node small{color:#9da6ae;line-height:1.5}.tutorial-node.locked{opacity:.45}.tutorial-node:hover{border-color:var(--amber)}
+.tutorial-tree{min-width:0;max-width:100%}.tutorial-node{flex:0 0 240px;max-width:240px;border-radius:6px}.tutorial-node:disabled{cursor:default}.tutorial-node.locked:hover{transform:none;border-color:var(--line)}.tutorial-instructions{padding:18px;border-bottom:1px solid var(--line);font-size:13px;line-height:1.7;overflow-wrap:anywhere}.tutorial-instructions h3{font-size:16px}.tutorial-instructions ol{padding-left:20px;color:var(--muted)}.tutorial-instructions strong{color:var(--lime)}
+.world-mode-list{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.world-mode-option{display:flex;align-items:center;gap:16px;min-height:130px;padding:24px;border:1px solid var(--line);border-radius:4px;background:rgba(16,25,37,.78);color:var(--cyan);text-align:left}.world-mode-option strong{flex:1;min-width:0;font-size:18px;color:#e0edf6}.world-mode-option:nth-child(2){color:var(--lime)}.world-mode-option:nth-child(3){color:var(--amber)}.world-mode-option:hover{border-color:currentColor}.world-mode-back{margin-bottom:20px}@media(max-width:900px){.world-mode-list{grid-template-columns:1fr}.world-mode-option{min-height:96px;padding:20px}}
+.world-list-heading{gap:12px}.world-list-heading>div{flex:1;min-width:0}.world-list-heading>.icon-btn{flex:none}.world-list-main{min-width:0}.world-list-main strong,.world-list-main small{overflow-wrap:anywhere}.world-list-empty select{max-width:100%;padding:8px;margin-bottom:14px;border:1px solid var(--line);background:var(--bg);color:inherit}.world-list-empty>.ghost-btn{display:inline-flex;align-items:center;gap:6px;margin-top:12px}
+@media(max-width:700px){.world-list-heading h2{font-size:24px;letter-spacing:0}.world-list-item{padding:14px;gap:10px}.world-workspace-header{flex-wrap:wrap;gap:10px}.world-workspace-title{min-width:0}.world-workspace-title h2{overflow-wrap:anywhere;font-size:20px}.world-map-meta{height:auto;min-height:45px;flex-wrap:wrap;gap:8px;padding:8px}.layer-options{gap:8px}}
 .layer-switch{display:flex;gap:3px}.layer-switch button{border:1px solid var(--line);background:#0b1621;color:#7f95a7;padding:5px 8px;font-size:10px}.layer-switch button.active{background:rgba(89,217,230,.16);border-color:rgba(89,217,230,.5);color:var(--cyan)}.tile-inspector{position:absolute;left:18px;bottom:18px;display:flex;flex-direction:column;gap:5px;padding:10px 12px;background:rgba(7,14,22,.9);border:1px solid rgba(89,217,230,.35);font:10px 'DM Mono',monospace;color:#b9cbd5;pointer-events:none}.tile-inspector b{color:#e6faff}.world-map-panel{position:relative}.organism-picker{display:flex;flex-direction:column;gap:5px;padding:12px;border-bottom:1px solid var(--line)}.organism-picker button{border:1px solid var(--line);background:#101f2c;color:#c3d4df;padding:8px;text-align:left;font-size:11px}.organism-picker small{color:#71869a;font-size:10px;line-height:1.5}
 </style>

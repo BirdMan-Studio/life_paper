@@ -4,7 +4,7 @@ pub use ai::{AiRunMetrics, AiRunReport, AiState};
 mod model;
 mod program;
 pub mod program_storage;
-pub use instance::{ComponentState, ContainerState, OrganismInstance};
+pub use instance::{ComponentState, ContainerState, InitialContainerContents, OrganismInstance};
 
 pub use model::{
     BiologicalOrganism, ComponentConnection, ComponentInstance, ComponentPlacement, ComponentSize,

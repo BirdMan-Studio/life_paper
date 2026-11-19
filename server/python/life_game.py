@@ -52,6 +52,12 @@ class Component(ReadOnly):
 
 
 class JetControl:
+    def jet_in_place(self, material, rate):
+        """Discharge at the outlet without thrust or initial material velocity."""
+        if not isinstance(material, str):
+            raise TypeError("material must be a registered substance ID")
+        return self._control("jet_in_place", rate, material=material)
+
     def jet(self, material, rate, angle=0):
         """Record the requested rate unchanged; the latest component output wins."""
         if not isinstance(material, str):

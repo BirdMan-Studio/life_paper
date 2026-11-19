@@ -1,4 +1,5 @@
 use super::{auth::authenticate, error::ApiError};
+use crate::game_state::{GameIdentity, GameState, authenticate as authenticate_game};
 use crate::{
     db::OrganismModelRecord,
     domain::{
@@ -39,6 +40,11 @@ pub fn routes() -> Router<AppState> {
             "/organism-models/{model_id}/entries",
             delete(delete_entry).patch(rename_entry),
         )
+        .layer(DefaultBodyLimit::max(MAX_FILE_SIZE))
+}
+
+pub fn instance_routes() -> Router<GameState> {
+    Router::new()
         .route(
             "/worlds/{world_id}/organisms/{organism_id}/folder",
             get(list_folder),
@@ -217,7 +223,10 @@ async fn create_model(
     ))
 }
 
-fn has_body_and_is_connected(organism: &BiologicalOrganism, registry: &ComponentRegistry) -> bool {
+pub(crate) fn has_body_and_is_connected(
+    organism: &BiologicalOrganism,
+    registry: &ComponentRegistry,
+) -> bool {
     let Some(body_id) = organism.components.iter().find_map(|(id, instance)| {
         registry
             .get(instance.component.as_str())
@@ -290,12 +299,12 @@ struct FolderEntry {
 }
 
 async fn list_folder(
-    State(state): State<AppState>,
+    State(state): State<GameState>,
     headers: HeaderMap,
     Path(ids): Path<BTreeMap<String, Uuid>>,
     Query(query): Query<EntryPathQuery>,
 ) -> Result<Json<DataResponse<Vec<FolderEntry>>>, ApiError> {
-    let session = authenticate(&state, &headers).await?;
+    let session = authenticate_game(&state, &headers).await?;
     let _storage_guard = state.organism_model_storage_lock.lock().await;
     let (_, target) = program_path(&state, &ids, session.user_id, &query.path, true).await?;
     let mut reader = tokio::fs::read_dir(&target)
@@ -322,12 +331,12 @@ async fn list_folder(
 }
 
 async fn create_folder(
-    State(state): State<AppState>,
+    State(state): State<GameState>,
     headers: HeaderMap,
     Path(ids): Path<BTreeMap<String, Uuid>>,
     Json(request): Json<CreateFolderRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let session = authenticate(&state, &headers).await?;
+    let session = authenticate_game(&state, &headers).await?;
     let _storage_guard = state.organism_model_storage_lock.lock().await;
     let (_, target) = program_path(&state, &ids, session.user_id, &request.path, false).await?;
     tokio::fs::create_dir_all(target).await.map_err(fs_error)?;
@@ -335,13 +344,13 @@ async fn create_folder(
 }
 
 async fn upload_file(
-    State(state): State<AppState>,
+    State(state): State<GameState>,
     headers: HeaderMap,
     Path(ids): Path<BTreeMap<String, Uuid>>,
     Query(query): Query<EntryPathQuery>,
     body: Bytes,
 ) -> Result<StatusCode, ApiError> {
-    let session = authenticate(&state, &headers).await?;
+    let session = authenticate_game(&state, &headers).await?;
     let _storage_guard = state.organism_model_storage_lock.lock().await;
     let (_, target) = program_path(&state, &ids, session.user_id, &query.path, false).await?;
     if let Some(parent) = target.parent() {
@@ -352,12 +361,12 @@ async fn upload_file(
 }
 
 async fn read_file(
-    State(state): State<AppState>,
+    State(state): State<GameState>,
     headers: HeaderMap,
     Path(ids): Path<BTreeMap<String, Uuid>>,
     Query(query): Query<EntryPathQuery>,
 ) -> Result<Bytes, ApiError> {
-    let session = authenticate(&state, &headers).await?;
+    let session = authenticate_game(&state, &headers).await?;
     let _storage_guard = state.organism_model_storage_lock.lock().await;
     let (_, target) = program_path(&state, &ids, session.user_id, &query.path, false).await?;
     let metadata = tokio::fs::metadata(&target)
@@ -373,12 +382,12 @@ async fn read_file(
 }
 
 async fn delete_entry(
-    State(state): State<AppState>,
+    State(state): State<GameState>,
     headers: HeaderMap,
     Path(ids): Path<BTreeMap<String, Uuid>>,
     Query(query): Query<EntryPathQuery>,
 ) -> Result<StatusCode, ApiError> {
-    let session = authenticate(&state, &headers).await?;
+    let session = authenticate_game(&state, &headers).await?;
     protect_instance_entry(&ids, &query.path)?;
     let _storage_guard = state.organism_model_storage_lock.lock().await;
     let (_, target) = program_path(&state, &ids, session.user_id, &query.path, false).await?;
@@ -394,12 +403,12 @@ async fn delete_entry(
 }
 
 async fn rename_entry(
-    State(state): State<AppState>,
+    State(state): State<GameState>,
     headers: HeaderMap,
     Path(ids): Path<BTreeMap<String, Uuid>>,
     Json(request): Json<RenameEntryRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let session = authenticate(&state, &headers).await?;
+    let session = authenticate_game(&state, &headers).await?;
     protect_instance_entry(&ids, &request.path)?;
     let _storage_guard = state.organism_model_storage_lock.lock().await;
     let (_, source) = program_path(&state, &ids, session.user_id, &request.path, false).await?;
@@ -483,7 +492,7 @@ async fn ensure_owned(state: &AppState, model_id: Uuid, user_id: i64) -> Result<
 }
 
 async fn program_path(
-    state: &AppState,
+    state: &GameState,
     ids: &BTreeMap<String, Uuid>,
     user_id: i64,
     path: &str,
@@ -491,8 +500,11 @@ async fn program_path(
 ) -> Result<(PathBuf, PathBuf), ApiError> {
     let relative = safe_relative_path(path, allow_root)?;
     let root = if let Some(model_id) = ids.get("model_id") {
-        ensure_owned(state, *model_id, user_id).await?;
-        state.organism_model_storage.join(model_id.to_string())
+        let GameIdentity::Embedded(central) = &state.identity else {
+            return Err(ApiError::NotFound);
+        };
+        ensure_owned(central, *model_id, user_id).await?;
+        central.organism_model_storage.join(model_id.to_string())
     } else {
         let world_id = *ids.get("world_id").ok_or(ApiError::NotFound)?;
         let organism_id = *ids.get("organism_id").ok_or(ApiError::NotFound)?;

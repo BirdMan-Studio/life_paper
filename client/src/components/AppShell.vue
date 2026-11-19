@@ -25,4 +25,18 @@ defineEmits(['navigate', 'toggle', 'logout'])
 .app-shell .topbar { flex-shrink:0; }
 .main-scroll { flex:1; min-height:0; overflow:auto; overscroll-behavior:contain; scrollbar-gutter:stable; }
 .main-scroll > .builder-page { height:100%; min-height:0; }
+@media(max-width:700px) {
+  html body { min-width:0; }
+  .app-shell > .sidebar { width:64px; padding:18px 8px; }
+  .app-shell .sidebar .brand { padding:0; justify-content:center; }
+  .app-shell .sidebar .brand > div:not(.brand-mark), .app-shell .sidebar .menu-toggle,
+  .app-shell .sidebar .nav-label, .app-shell .sidebar .nav-item > span,
+  .app-shell .sidebar .nav-arrow, .app-shell .sidebar-footer > span { display:none; }
+  .app-shell .sidebar .nav-item, .app-shell .sidebar-footer { justify-content:center; }
+  .app-shell .sidebar .nav-item { padding:12px 0; }
+  .app-shell .topbar { height:64px; padding:12px; }
+  .app-shell .top-actions { gap:10px; min-width:0; }
+  .app-shell .profile > span { display:none; }
+  .app-shell .content { padding:24px 16px; }
+}
 </style>

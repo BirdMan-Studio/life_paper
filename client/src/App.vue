@@ -33,7 +33,6 @@ async function register(payload) { if (await session.register(payload)) saveNoti
 async function logout() { await session.logout(); data.reset(); route.value = 'world' }
 async function deleteAccount() { try { await session.deleteAccount(); data.reset(); saveNotice(t('notice.deletedAccount')); route.value = 'world' } catch (error) { saveNotice(error.message, 'error') } }
 async function toggleWorld() { try { await data.setActiveWorldStatus() } catch (error) { saveNotice(error.message, 'error') } }
-async function tutorial() { try { await data.ensureTutorial() } catch (error) { saveNotice(error.message, 'error') } }
 function saveNotice(message, tone = 'info') { notice.value = message; noticeTone.value = tone }
 function closeToast() { if (session.error.value) session.clearError(); else if (notice.value) notice.value = ''; else data.clearError() }
 function serverChanged() { session.clearLocalSession(); data.reset(); selectedModel.value = null; route.value = 'world'; saveNotice(t('notice.serverChanged')) }
@@ -53,7 +52,7 @@ onBeforeUnmount(() => window.removeEventListener('life-paper:unauthorized', expi
   <ToastMessage :message="toastMessage" :tone="toastTone" @close="closeToast" />
   <LoginView v-if="!isReady" :loading="session.loading.value" @login="login" @register="register" @server-changed="serverChanged" />
   <AppShell v-else :route="route" :compact="compact" :profile="session.profile.value" :wallet="data.wallet.value" :label="currentLabel" @navigate="route = $event" @toggle="compact = !compact" @logout="logout">
-    <WorldView v-if="route === 'world'" :worlds="data.worlds.value" :active-world="data.activeWorld.value" :ground="data.ground.value" :wallet="data.wallet.value" :models="data.models.value" :loading="data.loading.value" @select-world="data.selectWorld" @toggle-world="toggleWorld" @tutorial="tutorial" @notify="saveNotice" />
+    <WorldView v-if="route === 'world'" :worlds="data.worlds.value" :tutorials="data.tutorials.value" :world-mode="data.worldMode.value" :world-ready="!!data.ground.value" :game-servers="data.gameServers.value" :active-world="data.activeWorld.value" :ground="data.ground.value" :wallet="data.wallet.value" :models="data.models.value" :loading="data.worldsLoading.value" :create-local-world="data.createLocal" :open-tutorial="data.openTutorial" @select-mode="data.selectWorldMode" @select-world="data.selectWorld" @close-world="data.closeWorld" @refresh-worlds="data.loadWorlds" @toggle-world="toggleWorld" @notify="saveNotice" />
     <CreaturesView v-else-if="route === 'creatures'" :components="data.unlockedComponents.value" :locked="data.lockedComponents.value" :models="data.models.value" :loading="data.loading.value" :unlock-action="unlockComponent" />
     <ModelsView v-else-if="route === 'models'" :models="data.models.value" :components="data.unlockedComponents.value" :loading="data.loading.value" @open="openModel" @create="route = 'model-builder'" />
     <ModelBuilderView v-else-if="route === 'model-builder'" :components="data.unlockedComponents.value" @back="route = 'models'" @created="modelCreated" @notify="saveNotice" />

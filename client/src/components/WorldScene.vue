@@ -1,6 +1,7 @@
 <script setup>
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import * as THREE from 'three'
+import { ZoomIn, ZoomOut, LocateFixed } from 'lucide-vue-next'
 import { useDataStore } from '../stores/data'
 import { organismRenderParts } from '../rendering/organism'
 import { createOrganismMesh } from '../rendering/organismThree'
@@ -11,6 +12,10 @@ const props = defineProps({ ground: Object, showOrganisms: { type: Boolean, defa
 const catalog = useDataStore().allComponents
 const emit = defineEmits(['tile-hover'])
 const host = ref(null)
+const zoomPercent = ref(100)
+const scaleLabel = ref(50)
+const scaleWidth = ref(60)
+let changeZoom, resetView, resizeObserver
 let renderer, camera, frame, resize, pointerDown, pointerMove, pointerUp, pointerHover, wheel
 let layerGroups, organismGroup, terrainAt
 let disposeScene
@@ -66,12 +71,20 @@ onMounted(() => {
     if (frame != null) return
     frame = requestAnimationFrame(() => {
       frame = null
+      zoomPercent.value = Math.round(camera.zoom * 100)
+      const unitsPerPixel = (camera.right - camera.left) / camera.zoom / Math.max(host.value.clientWidth, 1)
+      const target = unitsPerPixel * 80
+      const magnitude = 10 ** Math.floor(Math.log10(target))
+      scaleLabel.value = [5, 2, 1].map(n => n * magnitude).find(n => n <= target) || magnitude
+      scaleWidth.value = scaleLabel.value / unitsPerPixel
       map.position.set(camera.position.x, camera.position.y, 0)
       map.scale.set((camera.right - camera.left) / camera.zoom, (camera.top - camera.bottom) / camera.zoom, 1)
       renderer.render(scene, camera)
     })
   }
   resize()
+  resizeObserver = new ResizeObserver(resize)
+  resizeObserver.observe(host.value)
 
   let dragging = false; let startX = 0; let startY = 0; let startCameraX = 0; let startCameraY = 0
   pointerDown = event => { dragging = true; startX = event.clientX; startY = event.clientY; startCameraX = camera.position.x; startCameraY = camera.position.y; host.value.setPointerCapture(event.pointerId) }
@@ -88,15 +101,19 @@ onMounted(() => {
     pointerHover(event)
   }
   pointerUp = () => { dragging = false }
+  let homePosition = { x: 0, y: 0 }
   centerOnPosition = position => {
     if (!Number.isFinite(position?.x) || !Number.isFinite(position?.y)) return
     dragging = false
+    homePosition = { ...position }
     camera.position.x = position.x
     camera.position.y = -position.y
     emit('tile-hover', null)
     requestRender()
   }
-  wheel = event => { event.preventDefault(); camera.zoom = Math.min(16, Math.max(.25, camera.zoom * (event.deltaY < 0 ? 1.12 : .89))); camera.updateProjectionMatrix(); requestRender() }
+  changeZoom = factor => { camera.zoom = Math.min(16, Math.max(.25, camera.zoom * factor)); camera.updateProjectionMatrix(); requestRender() }
+  resetView = () => { camera.zoom = 1; camera.updateProjectionMatrix(); centerOnPosition(homePosition) }
+  wheel = event => { event.preventDefault(); changeZoom(event.deltaY < 0 ? 1.12 : .89) }
   host.value.addEventListener('pointerdown', pointerDown); host.value.addEventListener('pointermove', pointerMove); host.value.addEventListener('pointerup', pointerUp); host.value.addEventListener('pointercancel', pointerUp); host.value.addEventListener('wheel', wheel, { passive: false })
   watch([() => props.showOrganisms, () => props.showMatter], () => { applyLayerVisibility(); requestRender() }, { immediate: true })
   watch([() => props.organisms, catalog], ([list]) => {
@@ -113,7 +130,30 @@ onMounted(() => {
   }, { deep: true, immediate: true })
 })
 
-onBeforeUnmount(() => { cancelAnimationFrame(frame); disposeScene?.(); if (resize) window.removeEventListener('resize', resize); if (host.value) { host.value.removeEventListener('pointerdown', pointerDown); host.value.removeEventListener('pointermove', pointerMove); host.value.removeEventListener('pointerup', pointerUp); host.value.removeEventListener('pointercancel', pointerUp); host.value.removeEventListener('wheel', wheel) }; if (renderer) renderer.dispose() })
+onBeforeUnmount(() => { cancelAnimationFrame(frame); resizeObserver?.disconnect(); disposeScene?.(); if (resize) window.removeEventListener('resize', resize); if (host.value) { host.value.removeEventListener('pointerdown', pointerDown); host.value.removeEventListener('pointermove', pointerMove); host.value.removeEventListener('pointerup', pointerUp); host.value.removeEventListener('pointercancel', pointerUp); host.value.removeEventListener('wheel', wheel) }; if (renderer) renderer.dispose() })
 </script>
 
-<template><div ref="host" class="world-canvas"></div></template>
+<template>
+  <div ref="host" class="world-canvas">
+    <div class="map-navigation" @pointerdown.stop @pointermove.stop @wheel.stop.prevent>
+      <button type="button" title="放大" aria-label="放大" :disabled="zoomPercent >= 1600" @click="changeZoom(1.4)"><ZoomIn :size="18" /></button>
+      <span class="map-zoom">{{ zoomPercent }}%</span>
+      <button type="button" title="缩小" aria-label="缩小" :disabled="zoomPercent <= 25" @click="changeZoom(1 / 1.4)"><ZoomOut :size="18" /></button>
+      <button type="button" title="回到初始视野" aria-label="回到初始视野" @click="resetView()"><LocateFixed :size="18" /></button>
+    </div>
+    <div class="map-scale" @pointerdown.stop :style="{ width: `${scaleWidth}px` }"><span>{{ scaleLabel }} px</span></div>
+  </div>
+</template>
+
+<style scoped>
+.world-canvas { position: relative; overflow: hidden; }
+.world-canvas :deep(canvas) { display: block; }
+.map-navigation { position: absolute; top: 12px; right: 12px; z-index: 2; display: flex; align-items: center; padding: 3px; gap: 2px; background: #fffffff0; border: 1px solid #cbd3cb; border-radius: 6px; box-shadow: 0 2px 8px #152b1920; cursor: default; }
+.map-navigation button { display: grid; place-items: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: #344939; cursor: pointer; }
+.map-navigation button:hover { background: #e3ebe4; }
+.map-navigation button:disabled { opacity: .35; cursor: default; }
+.map-navigation button:focus-visible { outline: 2px solid #3c7364; outline-offset: -2px; }
+.map-zoom { width: 44px; text-align: center; font: 11px monospace; color: #435449; }
+.map-scale { position: absolute; right: 16px; bottom: 16px; z-index: 2; height: 7px; border: solid #fff; border-width: 0 1px 2px; filter: drop-shadow(0 1px 1px #233629); pointer-events: none; }
+.map-scale span { position: absolute; bottom: 6px; right: 0; white-space: nowrap; color: white; font: 11px monospace; }
+</style>

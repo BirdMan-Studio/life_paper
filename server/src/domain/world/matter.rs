@@ -8,6 +8,53 @@ pub type MatterAmounts = BTreeMap<ElementId, f64>;
 const RETENTION_PER_TICK: f64 = 0.999;
 const MAX_RADIUS_PX: u32 = 64;
 pub const RESTORED_EPSILON_MG: f64 = 0.000001;
+const EJECTA_DAMPING: f64 = 0.8;
+const EJECTA_DIFFUSION: f64 = 2.0;
+const EJECTA_RETENTION: f64 = 0.9;
+const EJECTA_STOP_SPEED: f64 = 0.01;
+
+/// A uniformly mixed, moving disk of ejected solids/liquids, separate from static stock.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct EjectaCloud {
+    pub id: Uuid,
+    pub source: MatterSource,
+    pub x: f64,
+    pub y: f64,
+    pub velocity_x: f64,
+    pub velocity_y: f64,
+    pub radius_px: f64,
+    pub amounts_mg: MatterAmounts,
+}
+
+impl EjectaCloud {
+    fn center(&self) -> MapPosition {
+        MapPosition {
+            x: self.x.floor() as i32,
+            y: self.y.floor() as i32,
+        }
+    }
+
+    fn radius(&self) -> u32 {
+        self.radius_px.ceil() as u32
+    }
+
+    fn contains(&self, position: MapPosition) -> bool {
+        (TerrainArea::Circle {
+            center: self.center(),
+            radius_px: self.radius(),
+        })
+        .contains(position)
+    }
+
+    fn cell_count(&self) -> usize {
+        static COUNTS: std::sync::OnceLock<Vec<usize>> = std::sync::OnceLock::new();
+        COUNTS.get_or_init(|| {
+            (0..=MAX_RADIUS_PX)
+                .map(|radius| cells(MapPosition::default(), radius).unwrap().len())
+                .collect()
+        })[self.radius() as usize]
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct MatterSource {
@@ -42,6 +89,7 @@ pub struct MatterRecord {
 pub struct WorldMatter {
     pub tick: u64,
     pub records: Vec<MatterRecord>,
+    pub ejecta: Vec<EjectaCloud>,
     #[serde(skip)]
     active_records: Vec<usize>,
 }
@@ -50,6 +98,8 @@ pub struct WorldMatter {
 struct SavedWorldMatter {
     tick: u64,
     records: Vec<MatterRecord>,
+    #[serde(default)]
+    ejecta: Vec<EjectaCloud>,
 }
 
 impl From<SavedWorldMatter> for WorldMatter {
@@ -57,6 +107,7 @@ impl From<SavedWorldMatter> for WorldMatter {
         let mut result = Self {
             tick: saved.tick,
             records: saved.records,
+            ejecta: saved.ejecta,
             active_records: Vec::new(),
         };
         // Legacy histories have no deadlines. A shared conservative deadline preserves overlaps.
@@ -120,6 +171,8 @@ pub struct MatterSync {
     pub retention_per_tick: f64,
     pub replenishment_per_tick: f64,
     pub records: Vec<MatterUpdate>,
+    /// Full regional snapshot on every response, including incremental record requests.
+    pub ejecta: Vec<EjectaCloud>,
 }
 
 #[derive(Debug, Serialize)]
@@ -248,6 +301,17 @@ impl WorldMatter {
             retention_per_tick: RETENTION_PER_TICK,
             replenishment_per_tick: 0.001,
             records,
+            ejecta: self
+                .ejecta
+                .iter()
+                .filter(|cloud| {
+                    let dx = i128::from(cloud.center().x) - i128::from(center.x);
+                    let dy = i128::from(cloud.center().y) - i128::from(center.y);
+                    let radius = i128::from(cloud.radius()) + i128::from(radius_px);
+                    dx * dx + dy * dy <= radius * radius
+                })
+                .cloned()
+                .collect(),
         })
     }
 
@@ -273,6 +337,29 @@ impl WorldMatter {
 
     pub fn advance_tick(&mut self) {
         self.tick = self.tick.saturating_add(1);
+        let retention = (-EJECTA_DAMPING).exp();
+        for cloud in &mut self.ejecta {
+            // Integrate exponential drag over one simulated second, then diffuse.
+            cloud.x += cloud.velocity_x * (1.0 - retention) / EJECTA_DAMPING;
+            cloud.y += cloud.velocity_y * (1.0 - retention) / EJECTA_DAMPING;
+            let limit = f64::from(i32::MAX) - f64::from(MAX_RADIUS_PX) - 1.0;
+            cloud.x = cloud.x.clamp(-limit, limit);
+            cloud.y = cloud.y.clamp(-limit, limit);
+            cloud.velocity_x *= retention;
+            cloud.velocity_y *= retention;
+            if cloud.velocity_x.hypot(cloud.velocity_y) < EJECTA_STOP_SPEED {
+                cloud.velocity_x = 0.0;
+                cloud.velocity_y = 0.0;
+            }
+            cloud.radius_px = (cloud.radius_px.powi(2) + 4.0 * EJECTA_DIFFUSION)
+                .sqrt()
+                .min(f64::from(MAX_RADIUS_PX));
+            cloud.amounts_mg.retain(|_, mass| {
+                *mass *= EJECTA_RETENTION;
+                *mass > RESTORED_EPSILON_MG
+            });
+        }
+        self.ejecta.retain(|cloud| !cloud.amounts_mg.is_empty());
         self.active_records.retain(|&index| {
             self.records[index]
                 .expires_at_tick
@@ -352,6 +439,14 @@ impl WorldMatter {
             last_tick = record.tick;
         }
         relax(&mut amounts, &target, self.tick.saturating_sub(last_tick));
+        for cloud in &self.ejecta {
+            if cloud.contains(position) {
+                let count = cloud.cell_count() as f64;
+                for (id, mass) in &cloud.amounts_mg {
+                    *amounts.entry(id.clone()).or_default() += mass / count;
+                }
+            }
+        }
         amounts
     }
 
@@ -402,6 +497,24 @@ impl WorldMatter {
             .into_iter()
             .map(|(id, mass)| (id, mass * fraction))
             .collect();
+        // Static records affect static stock only. Withdraw the same fraction of
+        // each cloud's overlapping cells separately to avoid replaying it twice.
+        let positions = cells(center, radius_px)?;
+        for cloud in &mut self.ejecta {
+            let overlap = positions
+                .iter()
+                .filter(|&&position| cloud.contains(position))
+                .count();
+            if overlap == 0 {
+                continue;
+            }
+            let removed = fraction * overlap as f64 / cloud.cell_count() as f64;
+            for mass in cloud.amounts_mg.values_mut() {
+                *mass *= 1.0 - removed;
+            }
+            cloud.amounts_mg.retain(|_, mass| *mass > 0.0);
+        }
+        self.ejecta.retain(|cloud| !cloud.amounts_mg.is_empty());
         self.push(MatterRecord {
             tick: self.tick,
             center,
@@ -417,6 +530,58 @@ impl WorldMatter {
             gas_added_ul: BTreeMap::new(),
         });
         Ok(absorbed_mg)
+    }
+
+    pub fn eject(
+        &mut self,
+        position: [f64; 2],
+        velocity: [f64; 2],
+        amounts_mg: MatterAmounts,
+        source: MatterSource,
+    ) -> Result<(), &'static str> {
+        if position
+            .iter()
+            .chain(velocity.iter())
+            .any(|value| !value.is_finite())
+            || position
+                .iter()
+                .any(|value| value.abs() > f64::from(i32::MAX) - 2048.0)
+            || velocity.iter().any(|value| value.abs() > 10_000.0)
+            || amounts_mg.is_empty()
+            || amounts_mg
+                .values()
+                .any(|mass| !mass.is_finite() || *mass <= 0.0)
+            || !amounts_mg.values().sum::<f64>().is_finite()
+        {
+            return Err("invalid ejecta state");
+        }
+        let cloud = EjectaCloud {
+            id: Uuid::new_v4(),
+            source: source.clone(),
+            x: position[0],
+            y: position[1],
+            velocity_x: velocity[0],
+            velocity_y: velocity[1],
+            radius_px: 0.0,
+            amounts_mg,
+        };
+        // The launch is history only; inventory is carried by the moving cloud.
+        self.records.push(MatterRecord {
+            tick: self.tick,
+            center: cloud.center(),
+            radius_px: 0,
+            cell_count: 1,
+            absorbed_mg: BTreeMap::new(),
+            added_mg: cloud.amounts_mg.clone(),
+            removed_fraction: 0.0,
+            source: Some(source),
+            expires_at_tick: Some(self.tick),
+            updated_at_sequence: self.records.len() as u64 + 1,
+            gas_absorbed_ul: BTreeMap::new(),
+            gas_added_ul: BTreeMap::new(),
+        });
+        self.ejecta.push(cloud);
+        Ok(())
     }
 
     /// Spread deposited solids/liquids uniformly over the covered cells.
@@ -497,6 +662,139 @@ mod tests {
     }
     fn close(a: f64, b: f64) {
         assert!((a - b).abs() < 1e-9, "{a} != {b}");
+    }
+
+    fn source() -> MatterSource {
+        MatterSource {
+            organism_id: Uuid::new_v4(),
+            component_id: Uuid::new_v4(),
+        }
+    }
+
+    #[test]
+    fn ejecta_drifts_slows_diffuses_and_disappears_without_static_duplicates() {
+        let world = flat("shallow_water");
+        let water = ElementId::new("water").unwrap();
+        let mut matter = WorldMatter::default();
+        matter
+            .eject(
+                [0.0, 0.0],
+                [40.0, 0.0],
+                [(water.clone(), 100.0)].into(),
+                source(),
+            )
+            .unwrap();
+        close(matter.at(&world, MapPosition::default())[&water], 100.0);
+        assert!(matter.active_records.is_empty());
+        assert_eq!(
+            matter.history(0, 100).unwrap().records[0].record.added_mg[&water],
+            100.0
+        );
+        matter.advance_tick();
+        let cloud = &matter.ejecta[0];
+        assert!(cloud.x > 20.0 && cloud.x < 40.0);
+        assert!(cloud.velocity_x > 0.0 && cloud.velocity_x < 40.0);
+        assert!(cloud.radius_px > 0.0);
+        assert!(matter.at(&world, MapPosition::default()).is_empty());
+        let sum: f64 = cells(cloud.center(), cloud.radius())
+            .unwrap()
+            .into_iter()
+            .map(|position| total(&matter.at(&world, position)))
+            .sum();
+        close(sum, 90.0);
+        let mut restored: WorldMatter =
+            serde_json::from_value(serde_json::to_value(&matter).unwrap()).unwrap();
+        assert_eq!(restored, matter);
+        for _ in 0..12 {
+            matter.advance_tick();
+            restored.advance_tick();
+        }
+        assert_eq!(restored, matter);
+        assert_eq!(matter.ejecta[0].velocity_x, 0.0);
+        let stopped_x = matter.ejecta[0].x;
+        matter.advance_tick();
+        assert_eq!(matter.ejecta[0].x, stopped_x);
+        for _ in 0..200 {
+            matter.advance_tick();
+        }
+        assert!(matter.ejecta.is_empty());
+        assert!(
+            matter
+                .area(&world, MapPosition { x: 50, y: 0 }, 64)
+                .unwrap()
+                .total_mg
+                .is_empty()
+        );
+        assert_eq!(matter.records.len(), 1);
+    }
+
+    #[test]
+    fn absorption_shares_static_and_moving_stock_without_creating_mass() {
+        let world = flat("shallow_water");
+        let water = ElementId::new("water").unwrap();
+        let mut matter = WorldMatter::default();
+        let center = MapPosition::default();
+        matter
+            .deposit(center, 0, [(water.clone(), 100.0)].into(), None)
+            .unwrap();
+        matter
+            .eject(
+                [0.0, 0.0],
+                [0.0, 0.0],
+                [(water.clone(), 100.0)].into(),
+                source(),
+            )
+            .unwrap();
+        close(
+            matter.absorb(&world, center, 0, 50.0, None).unwrap()[&water],
+            50.0,
+        );
+        close(matter.ejecta[0].amounts_mg[&water], 75.0);
+        close(matter.at(&world, center)[&water], 150.0);
+        matter.advance_tick();
+        let before = matter.area(&world, center, 5).unwrap().total_mg[&water];
+        close(
+            matter.absorb(&world, center, 0, 10.0, None).unwrap()[&water],
+            10.0,
+        );
+        close(
+            before - matter.area(&world, center, 5).unwrap().total_mg[&water],
+            10.0,
+        );
+        let restored: WorldMatter =
+            serde_json::from_value(serde_json::to_value(&matter).unwrap()).unwrap();
+        assert_eq!(restored, matter);
+        close(
+            matter.absorb(&world, center, 5, 1000.0, None).unwrap()[&water],
+            before - 10.0,
+        );
+        assert!(matter.ejecta.is_empty());
+        assert!(matter.area(&world, center, 5).unwrap().total_mg.is_empty());
+    }
+
+    #[test]
+    fn ejecta_sync_is_a_snapshot_even_without_new_history_and_legacy_saves_load() {
+        let mut matter: WorldMatter =
+            serde_json::from_value(serde_json::json!({ "tick": 0, "records": [] })).unwrap();
+        assert!(matter.ejecta.is_empty());
+        let water = ElementId::new("water").unwrap();
+        matter
+            .eject([0.0, 0.0], [40.0, 0.0], [(water, 100.0)].into(), source())
+            .unwrap();
+        let first = matter.sync(MapPosition::default(), 0, None).unwrap();
+        assert_eq!(first.ejecta.len(), 1);
+        matter.advance_tick();
+        let left = matter
+            .sync(MapPosition::default(), 0, Some(first.cursor))
+            .unwrap();
+        assert!(left.ejecta.is_empty());
+        let entered = matter
+            .sync(matter.ejecta[0].center(), 0, Some(first.cursor))
+            .unwrap();
+        assert_eq!(entered.ejecta.len(), 1);
+        assert_eq!(entered.cursor, first.cursor);
+        assert!(entered.records.is_empty());
+        assert_eq!(entered.ejecta[0].id, first.ejecta[0].id);
     }
 
     #[test]
