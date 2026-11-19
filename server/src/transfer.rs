@@ -4,8 +4,11 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{collections::BTreeMap, path::Path};
 use uuid::Uuid;
 
-pub const MAX_BUNDLE_BYTES: usize = 50 * 1024 * 1024;
-const MAX_SIGNED_BYTES: usize = 96 * 1024 * 1024;
+pub const MAX_BUNDLE_BYTES: usize =
+    crate::domain::organism::program_storage::MAX_ACCOUNT_STORAGE_BYTES as usize;
+// File bytes and then the signed JSON are both base64 encoded; reserve metadata space too.
+const MAX_SIGNED_BYTES: usize = MAX_BUNDLE_BYTES * 2;
+pub const MAX_TRANSFER_REQUEST_BYTES: usize = MAX_SIGNED_BYTES + 8 * 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -158,9 +161,7 @@ impl ModelBundle {
                     let bytes = std::fs::read(target)?;
                     total += bytes.len();
                     anyhow::ensure!(
-                        bytes.len() <= 10 * 1024 * 1024
-                            && total <= MAX_BUNDLE_BYTES
-                            && files.len() < 1024,
+                        total <= MAX_BUNDLE_BYTES && files.len() < 1024,
                         "model package too large"
                     );
                     files.insert(relative, BASE64.encode(bytes));
@@ -194,10 +195,7 @@ impl ModelBundle {
                 total = total
                     .checked_add(bytes.len())
                     .ok_or_else(|| anyhow::anyhow!("package size overflow"))?;
-                anyhow::ensure!(
-                    bytes.len() <= 10 * 1024 * 1024 && total <= MAX_BUNDLE_BYTES,
-                    "model package too large"
-                );
+                anyhow::ensure!(total <= MAX_BUNDLE_BYTES, "model package too large");
                 if let Some(parent) = file.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
@@ -216,6 +214,14 @@ impl ModelBundle {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn transfer_limits_cover_nested_base64_for_full_account_capacity() {
+        let encoded_files = MAX_BUNDLE_BYTES.div_ceil(3) * 4;
+        let signed_json = (encoded_files + 4 * 1024 * 1024).div_ceil(3) * 4 + 128;
+        assert!(signed_json <= MAX_SIGNED_BYTES);
+        assert!(signed_json + 1024 * 1024 <= MAX_TRANSFER_REQUEST_BYTES);
+    }
 
     pub(crate) fn key() -> Ed25519KeyPair {
         let document = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();

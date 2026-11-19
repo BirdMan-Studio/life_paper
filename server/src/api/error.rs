@@ -14,6 +14,7 @@ pub enum ApiError {
     Forbidden,
     NotFound,
     Conflict(String),
+    StorageQuotaExceeded,
     Internal,
 }
 
@@ -54,6 +55,11 @@ impl IntoResponse for ApiError {
                 "请求的资源不存在".to_string(),
             ),
             Self::Conflict(message) => (StatusCode::CONFLICT, "RESOURCE_CONFLICT", message),
+            Self::StorageQuotaExceeded => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "STORAGE_QUOTA_EXCEEDED",
+                "账号文件存储配额已满（500 MiB），或目录项过多，请删除不需要的文件后重试".into(),
+            ),
             Self::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "INTERNAL_ERROR",

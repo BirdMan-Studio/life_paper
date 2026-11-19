@@ -4,6 +4,7 @@ use std::{
 };
 
 pub const ENTRY_FILE: &str = "main.py";
+pub const MAX_ACCOUNT_STORAGE_BYTES: u64 = 500 * 1024 * 1024;
 const DEFAULT_CODE: &str = include_str!("../../../python/main.py");
 
 /// Content-based versions detect same-size edits and helper/resource changes too.
@@ -33,7 +34,7 @@ pub fn fingerprint(root: &Path) -> io::Result<String> {
                 hash.update(b"directory");
                 pending.push(relative);
             } else if metadata.is_file() {
-                let mut file = fs::File::open(path)?.take(10 * 1024 * 1024 + 1);
+                let mut file = fs::File::open(path)?;
                 let mut size = 0u64;
                 let mut buffer = [0u8; 8192];
                 hash.update(b"file");
@@ -45,7 +46,7 @@ pub fn fingerprint(root: &Path) -> io::Result<String> {
                     }
                     size += read as u64;
                     total += read as u64;
-                    if size > 10 * 1024 * 1024 || total > 50 * 1024 * 1024 {
+                    if total > MAX_ACCOUNT_STORAGE_BYTES {
                         return Err(invalid("program exceeds copy size limit"));
                     }
                     hash.update(&buffer[..read]);
@@ -147,7 +148,7 @@ pub fn clone_program(source: &Path, target: &Path) -> io::Result<()> {
                     pending.push(next);
                 } else if metadata.is_file() {
                     bytes = bytes.saturating_add(metadata.len());
-                    if metadata.len() > 10 * 1024 * 1024 || bytes > 50 * 1024 * 1024 {
+                    if bytes > MAX_ACCOUNT_STORAGE_BYTES {
                         return Err(invalid("program exceeds copy size limit"));
                     }
                     fs::copy(entry.path(), target.join(next))?;
@@ -209,13 +210,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_oversized_files_and_windows_path_aliases() {
+    fn rejects_programs_above_account_capacity_and_windows_path_aliases() {
         let root = std::env::temp_dir().join(format!("program-test-{}", uuid::Uuid::new_v4()));
         let source = root.join("model");
         fs::create_dir_all(&source).unwrap();
         fs::File::create(source.join("huge.py"))
             .unwrap()
-            .set_len(10 * 1024 * 1024 + 1)
+            .set_len(MAX_ACCOUNT_STORAGE_BYTES + 1)
             .unwrap();
         let target = root.join("instance");
         assert!(clone_program(&source, &target).is_err());

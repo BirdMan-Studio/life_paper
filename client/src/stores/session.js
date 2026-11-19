@@ -1,5 +1,5 @@
 import { computed, ref } from 'vue'
-import { ApiError, authApi, getToken, setToken } from '../api/http'
+import { ApiError, authApi, getApiBase, getToken, setToken, getSessionVersion } from '../api/http'
 
 const token = ref(getToken())
 const profile = ref(null)
@@ -11,17 +11,31 @@ export function useSession() {
 
   async function restore() {
     if (!token.value) return false
+    const version = getSessionVersion()
     loading.value = true; error.value = ''
-    try { profile.value = (await authApi.me()).data; return true }
-    catch (cause) { if (cause instanceof ApiError && cause.status === 401) { setToken(''); token.value = ''; profile.value = null }; error.value = cause.message; return false }
-    finally { loading.value = false }
+    try { const result = await authApi.me(); if (version !== getSessionVersion()) return false; profile.value = result.data; return true }
+    catch (cause) { if (version !== getSessionVersion()) return false; if (cause instanceof ApiError && cause.status === 401) { setToken(''); token.value = ''; profile.value = null }; error.value = cause.message; return false }
+    finally { if (version === getSessionVersion() || !token.value) loading.value = false }
   }
 
   async function login(payload) {
+    const base = getApiBase()
+    let version = getSessionVersion()
+    const isCurrent = () => base === getApiBase() && version === getSessionVersion()
     loading.value = true; error.value = ''
-    try { const result = await authApi.login(payload); setToken(result.data.token); token.value = result.data.token; profile.value = (await authApi.me()).data; return true }
-    catch (cause) { setToken(''); token.value = ''; profile.value = null; error.value = cause.message; return false }
-    finally { loading.value = false }
+    try {
+      const result = await authApi.login(payload)
+      if (!isCurrent()) return false
+      setToken(result.data.token)
+      version = getSessionVersion()
+      token.value = result.data.token
+      const account = await authApi.me()
+      if (!isCurrent()) return false
+      profile.value = account.data
+      return true
+    }
+    catch (cause) { if (!isCurrent()) return false; setToken(''); token.value = ''; profile.value = null; error.value = cause.message; return false }
+    finally { if (isCurrent() || !token.value) loading.value = false }
   }
 
   async function register(payload) {
@@ -32,19 +46,20 @@ export function useSession() {
   }
 
   async function logout() {
+    const version = getSessionVersion()
     const shouldRevoke = Boolean(token.value)
     if (shouldRevoke) {
       try { await authApi.logout() } catch {}
     }
-    clearLocalSession()
+    if (version === getSessionVersion()) clearLocalSession()
   }
 
   function clearLocalSession() {
-    setToken(''); token.value = ''; profile.value = null; error.value = ''
+    setToken(''); token.value = ''; profile.value = null; error.value = ''; loading.value = false
   }
 
   function clearError() { error.value = '' }
 
-  async function deleteAccount() { await authApi.deleteAccount(); await logout() }
+  async function deleteAccount() { const version = getSessionVersion(); await authApi.deleteAccount(); if (version === getSessionVersion()) await logout() }
   return { token, profile, loading, error, authenticated, restore, login, register, logout, clearLocalSession, clearError, deleteAccount }
 }

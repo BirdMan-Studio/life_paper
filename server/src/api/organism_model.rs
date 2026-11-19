@@ -24,7 +24,6 @@ use std::{
 use uuid::Uuid;
 
 const MAX_COMPONENTS: usize = 256;
-const MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -40,7 +39,7 @@ pub fn routes() -> Router<AppState> {
             "/organism-models/{model_id}/entries",
             delete(delete_entry).patch(rename_entry),
         )
-        .layer(DefaultBodyLimit::max(MAX_FILE_SIZE))
+        .layer(DefaultBodyLimit::max(crate::domain::organism::program_storage::MAX_ACCOUNT_STORAGE_BYTES as usize))
 }
 
 pub fn instance_routes() -> Router<GameState> {
@@ -61,7 +60,7 @@ pub fn instance_routes() -> Router<GameState> {
             "/worlds/{world_id}/organisms/{organism_id}/entries",
             delete(delete_entry).patch(rename_entry),
         )
-        .layer(DefaultBodyLimit::max(MAX_FILE_SIZE))
+        .layer(DefaultBodyLimit::max(crate::domain::organism::program_storage::MAX_ACCOUNT_STORAGE_BYTES as usize))
 }
 
 #[derive(Serialize)]
@@ -202,6 +201,10 @@ async fn create_model(
         ApiError::Internal
     })?;
     let folder = state.organism_model_storage.join(model_id.to_string());
+    super::storage_quota::check_upload(
+        &GameState::embedded(state.clone()), session.user_id,
+        folder.clone(), folder.clone(), None,
+    ).await?;
     tokio::fs::create_dir(&folder).await.map_err(fs_error)?;
     let record = match state
         .organism_models
@@ -338,7 +341,8 @@ async fn create_folder(
 ) -> Result<StatusCode, ApiError> {
     let session = authenticate_game(&state, &headers).await?;
     let _storage_guard = state.organism_model_storage_lock.lock().await;
-    let (_, target) = program_path(&state, &ids, session.user_id, &request.path, false).await?;
+    let (root, target) = program_path(&state, &ids, session.user_id, &request.path, false).await?;
+    super::storage_quota::check_upload(&state, session.user_id, root, target.clone(), None).await?;
     tokio::fs::create_dir_all(target).await.map_err(fs_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -352,7 +356,10 @@ async fn upload_file(
 ) -> Result<StatusCode, ApiError> {
     let session = authenticate_game(&state, &headers).await?;
     let _storage_guard = state.organism_model_storage_lock.lock().await;
-    let (_, target) = program_path(&state, &ids, session.user_id, &query.path, false).await?;
+    let (root, target) = program_path(&state, &ids, session.user_id, &query.path, false).await?;
+    super::storage_quota::check_upload(
+        &state, session.user_id, root, target.clone(), Some(body.len() as u64),
+    ).await?;
     if let Some(parent) = target.parent() {
         tokio::fs::create_dir_all(parent).await.map_err(fs_error)?;
     }
@@ -524,6 +531,12 @@ async fn program_path(
             .organism_instance_storage
             .join(organism_id.to_string());
         // Older instances receive an empty independent program, never the current model code.
+        if !root.join("main.py").is_file() {
+            super::storage_quota::check_upload(
+                state, user_id, root.clone(), root.join("main.py"),
+                Some(include_bytes!("../../python/main.py").len() as u64),
+            ).await?;
+        }
         crate::domain::organism::program_storage::ensure_entry(&root).map_err(fs_error)?;
         root
     };

@@ -4,6 +4,7 @@ use axum::{Router, routing::get};
 use tower_http::cors::CorsLayer;
 
 pub fn router(state: AppState, central_only: bool) -> Router {
+    let body_guard = BodyGuard::new(crate::game_state::GameState::embedded(state.clone()));
     let state_for_admin = state.clone();
     let relay = crate::relay::routes(state.clone());
     let app = Router::new()
@@ -14,13 +15,22 @@ pub fn router(state: AppState, central_only: bool) -> Router {
         .nest("/api/v1", crate::game_registry::routes())
         .nest("/api/v1", crate::tutorial::routes())
         .nest("/api/v1", super::organism_component::routes())
-        .nest("/api/v1", super::organism_model::routes())
+        .nest(
+            "/api/v1",
+            super::organism_model::routes().route_layer(axum::middleware::from_fn_with_state(
+                body_guard.clone(),
+                guard_body,
+            )),
+        )
         .nest("/api/v1", super::player::routes())
         .with_state(state.clone());
     let app = if central_only {
         app
     } else {
-        app.merge(game_router(crate::game_state::GameState::embedded(state)))
+        app.merge(game_router_guarded(
+            crate::game_state::GameState::embedded(state),
+            body_guard,
+        ))
     };
     app.merge(crate::administration::routes(state_for_admin))
         .merge(relay)
@@ -28,13 +38,71 @@ pub fn router(state: AppState, central_only: bool) -> Router {
 }
 
 pub fn game_router(state: crate::game_state::GameState) -> Router {
+    game_router_guarded(state.clone(), BodyGuard::new(state))
+}
+
+fn game_router_guarded(state: crate::game_state::GameState, guard: BodyGuard) -> Router {
     Router::new()
         .nest(
             "/api/v1",
             super::world::routes().merge(super::organism_model::instance_routes()),
         )
-        .layer(axum::extract::DefaultBodyLimit::max(100 * 1024 * 1024))
+        .layer(axum::extract::DefaultBodyLimit::max(
+            crate::transfer::MAX_TRANSFER_REQUEST_BYTES,
+        ))
+        .route_layer(axum::middleware::from_fn_with_state(guard, guard_body))
         .with_state(state)
+}
+
+#[derive(Clone)]
+struct BodyGuard {
+    game: crate::game_state::GameState,
+    slots: std::sync::Arc<tokio::sync::Semaphore>,
+}
+
+impl BodyGuard {
+    fn new(game: crate::game_state::GameState) -> Self {
+        Self {
+            game,
+            slots: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+        }
+    }
+}
+
+async fn guard_body(
+    axum::extract::State(guard): axum::extract::State<BodyGuard>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, super::error::ApiError> {
+    use axum::{body::HttpBody, http::StatusCode, response::IntoResponse};
+    guard.game.authenticate(request.headers()).await?;
+    // Unknown lengths (including chunked uploads) must reserve a slot too.
+    let large_body = request
+        .body()
+        .size_hint()
+        .upper()
+        .is_none_or(|size| size > 2 * 1024 * 1024);
+    let _permit = if !large_body {
+        None
+    } else {
+        match guard.slots.try_acquire() {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                return Ok((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [("Retry-After", "1")],
+                    axum::Json(serde_json::json!({
+                        "error": {
+                            "code": "REQUEST_BUSY",
+                            "message": "Server is processing another large request; retry shortly"
+                        }
+                    })),
+                )
+                    .into_response());
+            }
+        }
+    };
+    Ok(next.run(request).await)
 }
 
 async fn root() -> &'static str {
@@ -50,6 +118,130 @@ mod tests {
     };
     use std::sync::Arc;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn body_admission_authenticates_before_polling_and_releases_on_cancel() {
+        use crate::game_state::{GameIdentity, GameState};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let terrains = Arc::new(crate::domain::create_default_terrain_registry().unwrap());
+        let state = GameState {
+            identity: GameIdentity::Local {
+                token: "body-test".into(),
+            },
+            worlds: Arc::new(crate::domain::WorldDirectory::new(terrains.clone())),
+            terrains,
+            components: Arc::new(crate::domain::create_default_component_registry().unwrap()),
+            elements: Arc::new(crate::domain::create_default_element_registry().unwrap()),
+            ai_runtime: Arc::new(
+                crate::game::ai::AiRuntime::new(crate::config::AiConfig {
+                    enabled: false,
+                    ..Default::default()
+                })
+                .unwrap(),
+            ),
+            organism_instance_storage: Arc::new(std::path::PathBuf::new()),
+            organism_model_storage_lock: Arc::new(tokio::sync::Mutex::new(())),
+        };
+        let guard = BodyGuard::new(state.clone());
+        let app = game_router_guarded(state, guard.clone());
+        let polls = Arc::new(AtomicUsize::new(0));
+        let request = |token: &str| {
+            let polls = polls.clone();
+            let body = Body::from_stream(futures_util::stream::poll_fn(move |_| {
+                polls.fetch_add(1, Ordering::SeqCst);
+                std::task::Poll::<Option<Result<axum::body::Bytes, std::io::Error>>>::Pending
+            }));
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/worlds")
+                .header("Authorization", token)
+                .header("Content-Type", "application/json")
+                .header(
+                    "Content-Length",
+                    crate::transfer::MAX_TRANSFER_REQUEST_BYTES,
+                )
+                .body(body)
+                .unwrap()
+        };
+        for token in ["", "Bearer incorrect"] {
+            assert_eq!(
+                app.clone().oneshot(request(token)).await.unwrap().status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+        let permit = guard.slots.acquire().await.unwrap();
+        let response = app
+            .clone()
+            .oneshot(request("Bearer body-test"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["Retry-After"], "1");
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+        for (body, expected) in [
+            (
+                Body::from(vec![0u8; 2 * 1024 * 1024 + 1]),
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (Body::from("invalid json"), StatusCode::BAD_REQUEST),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/worlds")
+                        .header("Authorization", "Bearer body-test")
+                        .header("Content-Type", "application/json")
+                        .body(body)
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+        assert_eq!(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/worlds")
+                        .header("Authorization", "Bearer body-test")
+                        .body(Body::empty())
+                        .unwrap()
+                )
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        drop(permit);
+        let pending = tokio::spawn(app.clone().oneshot(request("Bearer body-test")));
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while polls.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        pending.abort();
+        assert!(pending.await.unwrap_err().is_cancelled());
+        assert_eq!(guard.slots.available_permits(), 1);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/worlds")
+                    .header("Authorization", "Bearer body-test")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from("invalid json"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(guard.slots.available_permits(), 1);
+    }
 
     #[tokio::test]
     async fn central_routes_exclude_worlds_while_combined_routes_keep_them() {
@@ -97,6 +289,28 @@ mod tests {
         crate::relay::tests::verify_http_relay(state.clone()).await;
         for central_only in [true, false] {
             let app = router(state.clone(), central_only);
+            let unread = Body::from_stream(futures_util::stream::poll_fn(|_| {
+                panic!("unauthenticated model upload polled the body");
+                #[allow(unreachable_code)]
+                std::task::Poll::<Option<Result<axum::body::Bytes, std::io::Error>>>::Pending
+            }));
+            assert_eq!(
+                app.clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("PUT")
+                            .uri(format!(
+                                "/api/v1/organism-models/{}/files?path=weights.bin",
+                                uuid::Uuid::new_v4()
+                            ))
+                            .body(unread)
+                            .unwrap()
+                    )
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
             let response = app
                 .clone()
                 .oneshot(

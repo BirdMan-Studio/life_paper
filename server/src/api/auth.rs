@@ -177,6 +177,7 @@ async fn delete_account(
         .into_iter()
         .map(|model| model.id)
         .collect();
+    let instance_folders = account_instance_folders(&state, session.user_id).await?;
 
     let deleted = state.users.delete(session.user_id).await.map_err(|error| {
         tracing::error!(target: "api", %error, user_id = session.user_id, "failed to delete account");
@@ -189,9 +190,7 @@ async fn delete_account(
 
     // Only remove in-memory and on-disk worlds after the account deletion
     // succeeds, so a database failure cannot destroy user data.
-    if !state.central_only {
-        state.worlds.remove_for_user(session.user_id);
-    }
+    remove_account_worlds(&state, session.user_id, instance_folders).await?;
     for model_id in model_ids {
         let folder = state.organism_model_storage.join(model_id.to_string());
         if let Err(error) = tokio::fs::remove_dir_all(folder).await
@@ -203,6 +202,67 @@ async fn delete_account(
     revoke_all_sessions(&state, session.user_id).await?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub(crate) async fn account_instance_folders(
+    state: &AppState,
+    user_id: i64,
+) -> Result<Vec<std::path::PathBuf>, ApiError> {
+    if state.central_only {
+        return Ok(Vec::new());
+    }
+    let worlds = state.worlds.clone();
+    let storage = state.organism_instance_storage.clone();
+    tokio::task::spawn_blocking(move || collect_instance_folders(&worlds, &storage, user_id))
+        .await
+        .map_err(|_| ApiError::Internal)?
+}
+
+fn collect_instance_folders(
+    worlds: &crate::domain::WorldDirectory,
+    storage: &std::path::Path,
+    user_id: i64,
+) -> Result<Vec<std::path::PathBuf>, ApiError> {
+    let mut folders = std::collections::BTreeSet::new();
+    for world in worlds.list_for_user(user_id) {
+        let snapshot = worlds
+            .read_world(world.id, user_id)
+            .map_err(super::world::map_world_error)?;
+        folders.extend(
+            snapshot
+                .organisms
+                .keys()
+                .map(|id| storage.join(id.to_string())),
+        );
+    }
+    Ok(folders.into_iter().collect())
+}
+
+pub(crate) async fn remove_account_worlds(
+    state: &AppState,
+    user_id: i64,
+    folders: Vec<std::path::PathBuf>,
+) -> Result<(), ApiError> {
+    if state.central_only {
+        return Ok(());
+    }
+    let worlds = state.worlds.clone();
+    tokio::task::spawn_blocking(move || {
+        worlds.remove_for_user(user_id);
+        remove_instance_folders(user_id, folders);
+    })
+    .await
+    .map_err(|_| ApiError::Internal)
+}
+
+fn remove_instance_folders(user_id: i64, folders: Vec<std::path::PathBuf>) {
+    for folder in folders {
+        if let Err(error) = std::fs::remove_dir_all(&folder)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(target: "api", %error, user_id, path = %folder.display(), "failed to remove instance folder after account deletion");
+        }
+    }
 }
 
 fn validate_registration(request: &RegisterRequest) -> Result<(), ApiError> {
@@ -399,4 +459,63 @@ fn map_create_user_error(error: sqlx::Error) -> ApiError {
 
     tracing::error!(target: "api", %error, "failed to create user");
     ApiError::Internal
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{
+        BiologicalOrganism, OrganismProgramId, WorldDirectory, WorldStatus,
+        create_default_component_registry, create_default_terrain_registry,
+    };
+    use std::sync::Arc;
+
+    #[test]
+    fn account_cleanup_removes_active_and_paused_instance_code_and_preserves_other_users() {
+        let root = std::env::temp_dir().join(format!("life-account-cleanup-{}", Uuid::new_v4()));
+        let terrains = Arc::new(create_default_terrain_registry().unwrap());
+        let worlds =
+            WorldDirectory::new_with_storage(terrains.clone(), root.join("worlds")).unwrap();
+        let storage = root.join("instances");
+        let registry = create_default_component_registry().unwrap();
+        let mut folders = Vec::new();
+        for (index, owner) in [7, 7, 8].into_iter().enumerate() {
+            let world = worlds
+                .create_player_world(owner, &format!("world-{index}"), "basic")
+                .unwrap();
+            let mut model = BiologicalOrganism::new(OrganismProgramId::new());
+            model.add_component("small_body_1", &registry).unwrap();
+            let organism = crate::domain::organism::OrganismInstance::from_model(
+                model.id,
+                owner,
+                "test".into(),
+                model,
+                &registry,
+            )
+            .unwrap();
+            let folder = storage.join(organism.id.to_string());
+            std::fs::create_dir_all(folder.join("lib")).unwrap();
+            std::fs::write(folder.join("main.py"), "def main(game): pass\n").unwrap();
+            std::fs::write(folder.join("lib/helper.py"), "value = 1\n").unwrap();
+            worlds.add_organism(world.id, organism).unwrap();
+            if index == 1 {
+                worlds.set_status(world.id, WorldStatus::Paused).unwrap();
+            }
+            folders.push(folder);
+        }
+        let collected = collect_instance_folders(&worlds, &storage, 7).unwrap();
+        assert_eq!(collected.len(), 2);
+        assert!(collected.contains(&folders[0]) && collected.contains(&folders[1]));
+        worlds.remove_for_user(7);
+        remove_instance_folders(7, collected.clone());
+        assert!(!folders[0].exists() && !folders[1].exists());
+        // Already missing directories are harmless on a repeated cleanup.
+        remove_instance_folders(7, collected);
+        assert!(folders[2].join("main.py").is_file());
+        assert!(folders[2].join("lib/helper.py").is_file());
+        let restored = WorldDirectory::new_with_storage(terrains, root.join("worlds")).unwrap();
+        assert!(restored.list_for_user(7).is_empty());
+        assert_eq!(restored.list_for_user(8).len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

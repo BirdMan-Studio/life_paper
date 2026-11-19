@@ -15,8 +15,8 @@ use std::{
 };
 use tokio::sync::Semaphore;
 
-const MAX_REQUEST: usize = 100 * 1024 * 1024;
-const MAX_RESPONSE: usize = 128 * 1024 * 1024;
+const MAX_REQUEST: usize = crate::transfer::MAX_TRANSFER_REQUEST_BYTES;
+const MAX_RESPONSE: usize = crate::transfer::MAX_TRANSFER_REQUEST_BYTES;
 const MAX_CONCURRENT: usize = 8;
 
 pub struct RelayService {

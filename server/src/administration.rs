@@ -565,12 +565,11 @@ async fn delete_record(
                 .list_for_user(user_id)
                 .await
                 .map_err(db_error)?;
+            let instance_folders = crate::api::auth::account_instance_folders(&state, user_id).await?;
             if !state.users.delete(user_id).await.map_err(db_error)? {
                 return Err(ApiError::NotFound);
             }
-            if !state.central_only {
-                state.worlds.remove_for_user(user_id);
-            }
+            crate::api::auth::remove_account_worlds(&state, user_id, instance_folders).await?;
             models.into_iter().map(|m| m.id).collect::<Vec<_>>()
         }
         "models" => {

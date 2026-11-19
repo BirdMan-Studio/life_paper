@@ -29,12 +29,20 @@ export async function selectGameTransport(directBase, relayBase, serverId, signa
 
 export async function fetchGameTransport(transport, path, options = {}) {
   const safe = ['GET', 'HEAD'].includes((options.method || 'GET').toUpperCase())
-  try { return await timedFetch(`${transport.base}${path}`, options, 35000) }
+  const readResponse = async () => {
+    const response = await timedFetch(`${transport.base}${path}`, options, 35000)
+    // Fetch resolves at headers; buffer the body here so interrupted downloads also fail over.
+    const body = await response.arrayBuffer()
+    return new Response(options.method?.toUpperCase() === 'HEAD' || [204, 205, 304].includes(response.status) ? null : body, {
+      status: response.status, statusText: response.statusText, headers: response.headers,
+    })
+  }
+  try { return await readResponse() }
   catch (error) {
     if (options.signal?.aborted) throw error
     if (!transport.usingRelay && transport.relayBase) {
       transport.base = transport.relayBase; transport.usingRelay = true
-      if (safe) return timedFetch(`${transport.base}${path}`, options, 35000)
+      if (safe) return readResponse()
     }
     throw new Error(safe ? '连接失败或请求超时' : '连接中断，操作结果未知，请刷新后确认')
   }

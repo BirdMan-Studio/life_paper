@@ -3,7 +3,7 @@
   "productName": "Life Paper",
   "version": "0.1.0",
   "identifier": "dev.lifepaper.desktop",
-  "build": { "beforeDevCommand": "npm run build", "beforeBuildCommand": "npm run build", "frontendDist": "../dist" },
+  "build": { "beforeDevCommand": "node scripts/prepare-engine.mjs && npm run build", "beforeBuildCommand": "node scripts/prepare-engine.mjs && npm run build", "frontendDist": "../dist" },
   "app": { "windows": [{ "title": "Life Paper", "width": 1440, "height": 900, "minWidth": 1100, "minHeight": 700, "resizable": true }], "security": { "csp": null } },
-  "bundle": { "active": true, "targets": "all", "icon": ["icons/icon.ico"] }
+  "bundle": { "active": true, "targets": "all", "externalBin": ["binaries/game-server"], "icon": ["icons/icon.ico"] }
 }

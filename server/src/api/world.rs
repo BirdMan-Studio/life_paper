@@ -274,11 +274,13 @@ async fn create_organism(
         .map_err(ApiError::BadRequest)?;
     let worlds = state.worlds.clone();
     let program = record.program;
+    let quota_roots = super::storage_quota::user_roots(&state, session.user_id).await?;
     let target = state
         .organism_instance_storage
         .join(organism.id.to_string());
     let result = tokio::task::spawn_blocking(move || {
         let _guard = storage_guard;
+        super::storage_quota::check_copy(&quota_roots, &program)?;
         worlds
             .place_organism(world_id, &mut organism)
             .map_err(map_world_error)?;

@@ -561,7 +561,11 @@ impl WorldDirectory {
             .map(|world| world.id)
             .collect();
         for world_id in world_ids {
-            state.worlds.remove(&world_id);
+            let world = state.worlds.get(&world_id).expect("listed world exists");
+            // Wait for any snapshot writer, then invalidate references held by tick workers.
+            let mut runtime = world.world.lock().expect("world runtime lock poisoned");
+            world.pause();
+            *runtime = None;
             if let Some(path) = self.snapshot_path(world_id) {
                 if let Err(error) = fs::remove_file(path)
                     && error.kind() != std::io::ErrorKind::NotFound
@@ -569,6 +573,8 @@ impl WorldDirectory {
                     tracing::warn!(target: "world", %error, %world_id, "failed to remove world snapshot");
                 }
             }
+            drop(runtime);
+            state.worlds.remove(&world_id);
         }
         state
             .tutorial_by_user_and_level
@@ -750,6 +756,42 @@ impl From<WorldGenerationError> for WorldDirectoryError {
 mod tests {
     use super::*;
     use crate::domain::create_default_terrain_registry;
+
+    #[test]
+    fn account_removal_waits_for_snapshot_writer_and_does_not_restore_deleted_worlds() {
+        let root = std::env::temp_dir().join(format!("life-delete-{}", Uuid::new_v4()));
+        let terrains = Arc::new(create_default_terrain_registry().unwrap());
+        let directory = Arc::new(WorldDirectory::new_with_storage(terrains.clone(), &root).unwrap());
+        let world = directory.create_player_world(7, "deleted", "basic").unwrap();
+        let retained = directory.create_player_world(8, "retained", "basic").unwrap();
+        let runtime = world.world.lock().unwrap();
+        let snapshot = runtime.as_ref().unwrap().clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = {
+            let directory = directory.clone();
+            std::thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                directory.remove_for_user(7);
+                done_tx.send(()).unwrap();
+            })
+        };
+        started_rx.recv().unwrap();
+        assert!(matches!(done_rx.recv_timeout(std::time::Duration::from_millis(100)), Err(std::sync::mpsc::RecvTimeoutError::Timeout)));
+        directory.save_snapshot(&world, &snapshot).unwrap();
+        drop(runtime);
+        worker.join().unwrap();
+        done_rx.recv().unwrap();
+        assert_eq!(world.status(), WorldStatus::Paused);
+        assert!(world.world().is_none());
+        assert!(!directory.snapshot_path(world.id).unwrap().exists());
+        assert!(directory.commit_tick(world.id, &snapshot, vec![]).is_err());
+        drop(directory);
+        let restored = WorldDirectory::new_with_storage(terrains, &root).unwrap();
+        assert!(restored.list_for_user(7).is_empty());
+        assert!(restored.get(retained.id).is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     fn test_organism(user_id: i64) -> crate::domain::organism::OrganismInstance {
         let registry = crate::domain::create_default_component_registry().unwrap();

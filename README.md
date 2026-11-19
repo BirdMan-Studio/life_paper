@@ -123,6 +123,8 @@ npm run build
 npx tauri build
 ```
 
+`tauri dev` 和 `tauri build` 会先编译本地 `game-server` 引擎，并按目标平台生成 sidecar，再构建前端。安装包自动包含引擎，安装后无需另外复制游戏服即可运行单人和教程世界。调试构建使用调试版引擎，生产构建使用 release 引擎；交叉编译需先安装相应 Rust target 和链接工具。教程脚本仍需要系统中的 Python 3。
+
 客户端结构：
 
 ```text

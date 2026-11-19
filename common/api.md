@@ -58,6 +58,8 @@
 
 ## 接口约定
 
+游戏 API 和模型文件 API 在读取请求体之前验证身份。超过 2 MiB 或长度未知（例如 chunked）的请求，每个进程同时最多处理一个；一体服的模型与游戏 API 共用名额，繁忙时直接返回 `503`、错误码 `REQUEST_BUSY` 和 `Retry-After: 1`，不读取请求正文。普通小请求不占用该名额；请求取消或处理结束后释放名额。此并发限制不改变账号累计 500 MiB 的存储配额。
+
 - 数据格式：请求和响应默认使用 `application/json`。
 - 认证：登录后返回 `token`，需要认证的请求携带 `Authorization: Bearer <token>`。
 - 标识符：资源 ID 使用 UUID 字符串；时间使用 ISO 8601 UTC 字符串。
@@ -105,7 +107,7 @@
 
 `DELETE /account`（需要认证）
 
-先撤销该账号的全部登录会话，再删除当前账号及其可删除的数据。其他设备持有的 token 也会立即失效。响应：`204 No Content`。
+删除当前账号及其可删除的数据，并撤销该账号的全部登录会话。删除前收集当前进程所管理世界中的实例代码目录；账号删除成功后停用并删除这些世界、模型目录和实例代码目录（包括暂停世界中的实例）。其他设备持有的中心 token 也会失效。独立游戏服的存档仍需单独管理。响应：`204 No Content`。
 
 ### 获取账号信息
 
@@ -526,7 +528,9 @@
 
 `PUT /organism-models/{model_id}/files?path=src/main.py`
 
-请求体直接传输文件原始字节，文件不存在时创建，已存在时覆盖。服务端会创建缺失的父目录，单文件最大 `10 MiB`。
+请求体直接传输文件原始字节，文件不存在时创建，已存在时覆盖。服务端会创建缺失的父目录；不另设单文件或单程序大小配额，只检查账号累计 `500 MiB` 配额。
+
+同一账号在当前服务器上的模型与生物实例代码文件合计最多 `500 MiB`（524288000 字节）。上传按覆盖后的实际总大小检查，删除或缩小文件会释放额度；创建实例复制代码时也检查配额。每份程序最多 1024 个文件/子目录，账号合计最多 32768 个目录项（包括程序根目录），空文件和空目录也计数。检查与写入共用存储锁，超限返回 `413`，错误码 `STORAGE_QUOTA_EXCEEDED`，不会写入目标文件或创建缺失目录。已有超额文件仍可删除或缩小；分离部署时各服务器分别计量。
 
 ### 删除模型文件或文件夹
 
@@ -618,7 +622,7 @@
 
 创建实例时复制模型目录中的全部文件及子目录，保存至配置文件同级的 `data/organism_instances/{实例UUID}/`。`composition.id` 和 `composition.program_id` 均改为实例 UUID，`model_id` 保留来源模型 UUID。复制为独立文件，修改或删除模型、修改其他实例不会影响已生成实例。
 
-入口固定为根目录 `main.py`；源模型缺少入口时补充含 `def main(game)` 的示例入口。复制失败或实例存档失败时不创建实例，回滚新代码目录。单文件最大 10 MiB，复制总量最多 50 MiB、1024 个目录项，不接受符号链接或 Windows 重解析点。代码目录与世界存档均需备份。
+入口固定为根目录 `main.py`；源模型缺少入口时补充含 `def main(game)` 的示例入口。复制失败或实例存档失败时不创建实例，回滚新代码目录。复制后的代码计入账号累计 500 MiB 配额，每份程序最多 1024 个目录项，不接受符号链接或 Windows 重解析点。指纹、导出和导入不再使用原来的单文件 10 MiB、单程序 50 MiB 限制。代码目录与世界存档均需备份。
 
 以下接口需要 Bearer 登录凭证，并验证世界、实例归属。路径通过 `path` 指定，必须是目录内的相对路径。
 
@@ -626,7 +630,7 @@
 | --- | --- | --- |
 | GET | `/api/v1/worlds/{world_id}/organisms/{organism_id}/folder?path=` | 获取目录，返回 `{ "data": [{ "name", "path", "kind", "size" }] }` |
 | GET | `/api/v1/worlds/{world_id}/organisms/{organism_id}/files?path=main.py` | 读取文件原文 |
-| PUT | 同上 | 原始文件内容请求体，保存成功返回 204，最大 10 MiB |
+| PUT | 同上 | 原始文件内容请求体，保存成功返回 204，按账号累计 500 MiB 配额检查 |
 | POST | `/api/v1/worlds/{world_id}/organisms/{organism_id}/folders` | `{ "path": "lib" }` 创建目录，返回 204 |
 | PATCH | `/api/v1/worlds/{world_id}/organisms/{organism_id}/entries` | `{ "path": "brain.py", "name": "helpers.py" }` 重命名，返回 204 |
 | DELETE | `/api/v1/worlds/{world_id}/organisms/{organism_id}/entries?path=brain.py` | 删除文件或目录，返回 204 |
@@ -730,7 +734,7 @@ Python SDK、可见范围、配置与运行限制详见 [AI 接口说明](ai.md)
 
 `/api/v1/relay/{server_id}/{path}` 支持 GET、HEAD、POST、PUT、PATCH、DELETE，保留查询参数、正文、Content-Type和上游状态码。Bearer必须为该游戏服的有效签名票据：`worlds`、`worlds/...`、`game-server`、`python-api` 使用 `game-entry`；`management/logs`、`management/worlds` 及其子路径使用 `game-admin`。禁止转发其他命名空间及越界路径；仅允许中心登记且当前在线的游戏服。响应携带 `x-life-paper-transport: relay`，不缓存。账号令牌、管理员令牌及接入密钥均不能用作中继凭证。
 
-请求体上限100 MiB、响应128 MiB、并发8、上游超时30秒。不可达返回502，超时504，繁忙503，请求体超限413。客户端只自动重试读请求，写请求连接中断须先查询确认结果再决定是否重试。部署边界见 [拆分部署说明](deployment.md)。
+请求体和响应的传输上限均为1008 MiB（为500 MiB原始文件内容的嵌套base64及JSON预留空间，实际文件存储仍受账号500 MiB配额限制）、并发8、上游超时30秒。不可达返回502，超时504，繁忙503，请求体超限413。客户端只自动重试读请求，写请求连接中断须先查询确认结果再决定是否重试。部署边界见 [拆分部署说明](deployment.md)。
 
 ### Python API 文档
 

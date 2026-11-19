@@ -26,6 +26,7 @@ function resetConnections() { connectionGeneration++; leaveWorld(); gameSessions
 export function getApiBase() { return (localStorage.getItem(SERVER_KEY) || 'http://127.0.0.1:8080/api/v1').replace(/\/$/, '') }
 export function setApiBase(value) { localStorage.setItem(SERVER_KEY, value.trim().replace(/\/$/, '')); resetConnections() }
 export function getToken() { return localStorage.getItem(TOKEN_KEY) || '' }
+export function getSessionVersion() { return connectionGeneration }
 export function setToken(value) { value ? localStorage.setItem(TOKEN_KEY, value) : localStorage.removeItem(TOKEN_KEY); resetConnections() }
 export class ApiError extends Error { constructor(message, status = 0) { super(message); this.name = 'ApiError'; this.status = status } }
 
@@ -45,7 +46,7 @@ async function getGameSession(worldId, serverId) {
     const transport = await selectGameTransport(result.data.direct_url || result.data.api_url, resolveRelayBase(central, id, result.data.relay_url), id, signal)
     signal?.throwIfAborted()
     if (generation !== connectionGeneration) throw new ApiError('登录状态已变更')
-    return { key, transport, serverId: id, token: result.data.token, expiresAt: Date.now() + result.data.expires_in * 1000 }
+    return { key, transport, serverId: id, token: result.data.token, expiresAt: Date.now() + result.data.expires_in * 1000, generation }
   })()
   gameSessions.set(key, entry)
   try {
@@ -71,14 +72,17 @@ async function requestTarget(path, options) {
     signal.throwIfAborted()
     return { ...session, signal, game: true }
   }
-  return { base: getApiBase(), token: getToken(), game: false }
+  return { base: getApiBase(), token: getToken(), generation: connectionGeneration, game: false }
 }
 
 function handleUnauthorized(response, target) {
   if (response.status !== 401) return
   if (target.local) throw new ApiError('本地游戏引擎凭证已失效，请重新进入世界', 401)
-  else if (target.game) gameSessions.delete(target.key)
-  else window.dispatchEvent(new CustomEvent('life-paper:unauthorized'))
+  else if (target.game) {
+    if (target.generation === connectionGeneration && gameSessions.get(target.key)?.token === target.token) gameSessions.delete(target.key)
+  } else if (target.base === getApiBase() && target.token === getToken() && target.generation === connectionGeneration) {
+    window.dispatchEvent(new CustomEvent('life-paper:unauthorized'))
+  }
 }
 
 function checkWorldEndpoint(response, path, target) {
@@ -166,7 +170,7 @@ export const organismApi = {
     return {
       status: () => apiRequest(`${base}/ai`),
       folder: (_id, path = '') => apiRequest(`${base}/folder?${new URLSearchParams({ path })}`),
-      file: async (_id, path) => (await apiRequestRaw(`${base}/files?${new URLSearchParams({ path })}`)).text(),
+      file: async (_id, path) => (await apiRequestRaw(`${base}/files?${new URLSearchParams({ path })}`)).blob(),
       upload: (_id, path, file) => apiRequestRaw(`${base}/files?${new URLSearchParams({ path })}`, { method: 'PUT', body: file }),
       createFolder: (_id, path) => apiRequest(`${base}/folders`, { method: 'POST', body: JSON.stringify({ path }) }),
       deleteEntry: (_id, path) => apiRequest(`${base}/entries?${new URLSearchParams({ path })}`, { method: 'DELETE' }),
@@ -174,7 +178,7 @@ export const organismApi = {
     }
   },
 }
-export const modelApi = { list: () => apiRequest('/organism-models'), create: (payload) => apiRequest('/organism-models', { method: 'POST', body: JSON.stringify(payload) }), remove: (id) => apiRequest(`/organism-models/${id}`, { method: 'DELETE' }), folder: (id, path = '') => apiRequest(`/organism-models/${id}/folder?${new URLSearchParams({ path })}`), file: async (id, path) => (await apiRequestRaw(`/organism-models/${id}/files?${new URLSearchParams({ path })}`)).text(), upload: (id, path, file) => apiRequestRaw(`/organism-models/${id}/files?${new URLSearchParams({ path })}`, { method: 'PUT', body: file }), createFolder: (id, path) => apiRequest(`/organism-models/${id}/folders`, { method: 'POST', body: JSON.stringify({ path }) }), deleteEntry: (id, path) => apiRequest(`/organism-models/${id}/entries?${new URLSearchParams({ path })}`, { method: 'DELETE' }), renameEntry: (id, path, name) => apiRequest(`/organism-models/${id}/entries`, { method: 'PATCH', body: JSON.stringify({ path, name }) }) }
+export const modelApi = { list: () => apiRequest('/organism-models'), create: (payload) => apiRequest('/organism-models', { method: 'POST', body: JSON.stringify(payload) }), remove: (id) => apiRequest(`/organism-models/${id}`, { method: 'DELETE' }), folder: (id, path = '') => apiRequest(`/organism-models/${id}/folder?${new URLSearchParams({ path })}`), file: async (id, path) => (await apiRequestRaw(`/organism-models/${id}/files?${new URLSearchParams({ path })}`)).blob(), upload: (id, path, file) => apiRequestRaw(`/organism-models/${id}/files?${new URLSearchParams({ path })}`, { method: 'PUT', body: file }), createFolder: (id, path) => apiRequest(`/organism-models/${id}/folders`, { method: 'POST', body: JSON.stringify({ path }) }), deleteEntry: (id, path) => apiRequest(`/organism-models/${id}/entries?${new URLSearchParams({ path })}`, { method: 'DELETE' }), renameEntry: (id, path, name) => apiRequest(`/organism-models/${id}/entries`, { method: 'PATCH', body: JSON.stringify({ path, name }) }) }
 export const componentApi = { all: () => apiRequest('/organism-components'), unlocked: () => apiRequest('/organism-components/unlocked'), locked: () => apiRequest('/organism-components/locked'), unlock: (id) => apiRequest(`/organism-components/${id}/unlock`, { method: 'POST' }) }
 export const storageKeys = { SERVER_KEY, TOKEN_KEY }
 export const pythonApi = { documentation: () => apiRequest('/python-api') }

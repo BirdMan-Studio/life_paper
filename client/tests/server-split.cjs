@@ -35,7 +35,7 @@ const assert = require('node:assert/strict');
       if (path.includes('/relay/')) {
         assert.equal(req.headers().authorization, 'Bearer game-1-ticket');
         relayRequests.push({ method: req.method(), path });
-        if (path.endsWith('/files')) return route.fulfill({ body: 'raw code' });
+        if (path.endsWith('/files')) return route.fulfill({ body: Buffer.from([255, 128]) });
         return route.fulfill({ json: worldResponse(req) });
       }
       assert.equal(req.headers().authorization, 'Bearer account-secret');
@@ -48,6 +48,7 @@ const assert = require('node:assert/strict');
         return route.fulfill({ json: { data: { game_server_id: id, api_url: `https://${id.replace('-', '')}.test/api/v1`, token: `${id}-ticket`, relay_url: `/api/v1/relay/${id}`, expires_in: 900 } } });
       }
       if (path.endsWith('/export')) return route.fulfill({ json: { data: { model_bundle: 'signed-model-package' } } });
+      if (path.endsWith('/files')) return route.fulfill({ body: Buffer.from([255, 128]) });
       if (path.endsWith('/player/data')) return route.fulfill({ json: { data: { energy_coins: 0, gold_coins: 0, bio_soup: [] } } });
       if (path.endsWith('/account/me')) return route.fulfill({ json: { data: { username: 'Tester' } } });
       if (path.includes('/worlds')) { assert(combined); return route.fulfill({ json: worldResponse(req) }); }
@@ -63,7 +64,7 @@ const assert = require('node:assert/strict');
       }
       assert.equal(req.headers().authorization, `Bearer ${id}-ticket`);
       if (rejectGame) return route.fulfill({ status: 401, json: { error: { message: 'ticket expired' } } });
-      if (url.pathname.endsWith('/files')) return route.fulfill({ body: 'raw code' });
+      if (url.pathname.endsWith('/files')) return route.fulfill({ body: Buffer.from([255, 128]) });
       return route.fulfill({ json: worldResponse(req) });
     });
     const run = fn => page.evaluate(fn);
@@ -80,7 +81,9 @@ const assert = require('node:assert/strict');
       const api = await import('/src/api/http.js'); api.enterWorld('world-1');
       await Promise.all([api.worldApi.ground('world-1'), api.organismApi.list('world-1')]);
       await api.organismApi.create('world-1', 'model-1');
-      if (await api.organismApi.program('world-1', 'instance-1').file('', 'main.py') !== 'raw code') throw new Error('Raw transfer failed');
+      for (const file of [await api.organismApi.program('world-1', 'instance-1').file('', 'weights.bin'), await api.modelApi.file('model-1', 'weights.bin')]) {
+        if (String(new Uint8Array(await file.arrayBuffer())) !== '255,128') throw new Error('Raw transfer corrupted binary bytes');
+      }
     });
     assert.equal(tickets.length, 1, 'Concurrent world calls share connection ticket');
     rejectGame = true;

@@ -5,6 +5,7 @@ pub(crate) mod organism_model;
 mod player;
 pub(crate) mod python_docs;
 mod routes;
+pub(crate) mod storage_quota;
 mod transfer;
 mod world;
 
